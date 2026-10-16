@@ -1,0 +1,41 @@
+name: rewards
+description: "Rewards Hub - hybrid monetization home screen (AdMob banner + WebView offerwall) built with Flutter for Android and iOS."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # State management
+  provider: 6.1.5+1
+
+  # Offerwall WebView with a JavaScript <-> Dart bridge
+  webview_flutter: 4.13.0
+
+  # AdMob banner ads (Google Mobile Ads)
+  google_mobile_ads: 5.3.1
+
+  # Local persistence of the points balance
+  shared_preferences: 2.5.3
+
+  # URLs / external link handling
+  url_launcher: 6.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/offerwall/

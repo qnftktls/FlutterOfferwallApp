@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Offers</title>
+<style>
+  :root{
+    --bg:#ffffff; --card:#ffffff; --raised:#f4f7fb; --ink:#0a2540; --muted:#5b6b7c;
+    --accent:#00b37e; --line:#e6eaf0; --radius:16px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0b1220; --card:#141c2b; --raised:#141c2b; --ink:#eaf0f7; --muted:#9aa9bc;
+      --accent:#2fe0a8; --line:#22304a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,Roboto,"Helvetica Neue",Arial,sans-serif;
+    padding:16px 16px 24px;}
+  .hero{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;}
+  .hero h1{font-size:20px;margin:0;letter-spacing:.2px;}
+  .hero .sub{font-size:13px;color:var(--muted);margin-top:2px;}
+  .list{display:grid;gap:12px;}
+  .offer{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:14px;display:flex;align-items:center;gap:14px;}
+  .logo{width:44px;height:44px;border-radius:12px;background:var(--raised);
+    display:grid;place-items:center;font-weight:700;font-size:16px;color:var(--accent);flex:0 0 auto;}
+  .meta{flex:1;min-width:0}
+  .meta .title{font-size:15px;font-weight:600;margin:0 0 2px;}
+  .meta .desc{font-size:12.5px;color:var(--muted);margin:0;}
+  .reward{flex:0 0 auto;text-align:right;}
+  .reward .pts{font-size:15px;font-weight:700;color:var(--accent);}
+  .reward .unit{font-size:11px;color:var(--muted);}
+  .cta{display:block;width:100%;margin-top:4px;padding:12px;border:0;border-radius:12px;
+    background:var(--accent);color:#04121f;font-weight:700;font-size:15px;min-height:48px;}
+  .note{font-size:12px;color:var(--muted);margin-top:16px;text-align:center;line-height:1.5;}
+  .badge{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;
+    padding:3px 10px;}
+</style>
+</head>
+<body>
+  <div class="hero">
+    <div>
+      <h1>Earn Rewards</h1>
+      <div class="sub">Complete offers to top up your balance</div>
+    </div>
+    <span class="badge">Placeholder</span>
+  </div>
+
+  <div class="list" id="list"></div>
+
+  <button class="cta" onclick="completeOffer(1001, 250)">Simulate: complete top offer</button>
+
+  <p class="note">
+    This is a bundled placeholder. Replace it with your provider's offerwall URL in
+    <code>OfferwallConfig.offerwallUrl</code>. Completing an offer now calls the Flutter bridge.
+  </p>
+
+<script>
+  // ── Offer data (placeholder) ─────────────────────────────────────────────
+  const offers = [
+    {id:1001, brand:"Playtime", title:"Try a featured game", desc:"Reach level 5 · ~3 min", pts:250},
+    {id:1002, brand:"SurveyX",  title:"Quick opinion survey", desc:"5 questions · ~2 min", pts:120},
+    {id:1003, brand:"ShopBack", title:"Install & open app",   desc:"First launch only",    pts:80 },
+    {id:1004, brand:"FitLoop",  title:"Start a free trial",   desc:"No card required",     pts:400}
+  ];
+
+  const list = document.getElementById('list');
+  offers.forEach(o => {
+    const el = document.createElement('div');
+    el.className = 'offer';
+    el.innerHTML = `
+      <div class="logo">${o.brand.slice(0,2).toUpperCase()}</div>
+      <div class="meta">
+        <p class="title">${o.title}</p>
+        <p class="desc">${o.brand} · ${o.desc}</p>
+      </div>
+      <div class="reward"><div class="pts">+${o.pts}</div><div class="unit">pts</div></div>`;
+    el.addEventListener('click', () => completeOffer(o.id, o.pts));
+    list.appendChild(el);
+  });
+
+  // ── Bridge adapter ───────────────────────────────────────────────────────
+  // Flutter's WebView exposes a JavaScriptChannel named "AndroidOfferwall"
+  // whose method is `postMessage(String)`. We keep the SAME contract the native
+  // app used (window.AndroidOfferwall.onOfferCompleted / onOfferwallReady /
+  // onOfferwallError) so provider pages written for the native build work as-is.
+  const channel = window.AndroidOfferwall; // injected by Flutter (JavaScriptChannel)
+  const hasBridge = channel && typeof channel.postMessage === 'function';
+
+  function send(type, payload){
+    if (!hasBridge) { console.log('Flutter bridge unavailable (running outside the app?)'); return; }
+    channel.postMessage(JSON.stringify(Object.assign({type:type}, payload)));
+  }
+
+  function completeOffer(id, pts){
+    // In production the signature is a server-signed token, never a client value.
+    send('offerCompleted', {offerId:String(id), reward:pts, signature:''});
+  }
+
+  // Tell native we are ready so it can push the current balance.
+  document.addEventListener('DOMContentLoaded', () => send('offerwallReady', {}));
+
+  // Receive the balance pushed from Flutter (see OfferwallController.pushBalance).
+  window.addEventListener('nativeBalance', (e) => {
+    console.log('native balance =', e.detail);
+    const el = document.getElementById('balanceLine');
+    if (el) el.textContent = 'Balance: ' + e.detail.toLocaleString() + ' pts';
+  });
+</script>
+</body>
+</html>
