@@ -239,35 +239,177 @@ python verify_deployment.py
 
 ## 4. 남은 작업 순서
 
-### ✅ 완료 (STEP 3 배포 + 원장 검증)
+### ✅ 완료 — 보안 규칙 + Node 22 적용됨
+
+`-ApplyRules` 실행 후 **원격 독립 검증** 결과 (사용자 로그를 믿지 않고 직접 확인):
 
 ```
-[3] 잔액 조작 시도       → HTTP 200  (규칙은 아직 열려 있음)
-[3] 조작된 잔액으로 출금  → HTTP 400
-    {"message":"Insufficient verified balance: have 0, need 50000."}
+[1] 실제 배포된 규칙
+    ruleset = 6475e2f3-...   updateTime = 2026-10-18T05:48:23Z
+    포괄적 allow read, write : 없음 ✅
+    points/tx 서버값 고정    : 예 ✅
+    serverLedger 보호        : 예 ✅
+
+[2] 익스플로잇 재시도 (어제 $50 성공했던 그 공격)
+    잔액 조작  → HTTP 403  ✅ 차단됨
+    출금 시도  → HTTP 400  Insufficient verified balance
+
+[4] Node 22 마이그레이션
+    배포 로그: "updating Node.js 22 (2nd Gen) function" ✅
 ```
 
-**서버 전용 원장이 실제로 돈을 막았습니다.** 보안 규칙이 아직 적용되지 않았는데도
-인출이 불가능해졌습니다 — 2겹 방어가 설계대로 작동합니다.
+### 🔴 하지만 발견된 새 치명 버그 — 원장이 한 번도 기록되지 않았습니다
 
-### 🔴 남은 1개 — 보안 규칙 적용 (1겹)
+사용자 `STEP 6` 로그는 **전부 초록불**이었지만, 제 독립 검증에서 잡았습니다:
+
+```
+정상 보상 누적  → 7950p ($7.95)      ✅ 적립은 정상
+정상 출금 시도  → HTTP 400
+    "Insufficient verified balance: have 0, need 5000."
+Firestore serverLedger = unverified=None verified=None   ← 기록 안 됨
+```
+
+**정당한 사용자도 출금이 불가능했습니다.** 어제 만든 원장이 실은 작동하지 않았습니다.
+
+#### 원인 — Firestore `set({merge:true})` 는 점(.)을 경로로 해석하지 않습니다
+
+```typescript
+// ❌ 이렇게 쓰면:
+[ "serverLedger.unverified" ]: FieldValue.increment(250)
+
+// 실제로 저장되는 것:  ← 점이 든 "단일 필드명"!
+{ "serverLedger.unverified": 250, "points": 250 }
+```
+
+`readLedger()` 는 `data.serverLedger.verified` 를 읽으므로 **항상 undefined → 0**.
+
+실측으로 확인했습니다 (`functions/` 에서 직접 실행):
+
+```
+dotted key  → { "serverLedger.unverified": 250 }    ← 잘못됨
+nested      → { serverLedger: { unverified: 250 } } ← 정상
+```
+
+#### 수정 — 중첩 객체로 쓰기
+
+```typescript
+// ✅ 이렇게 쓰면 두 버킷이 서로를 덮어쓰지도 않습니다
+const ledgerUpdate = verified
+  ? { serverLedger: { verified: FieldValue.increment(points) } }
+  : { serverLedger: { unverified: FieldValue.increment(points) } };
+```
+
+런타임 스모크로 검증했습니다: `unverified=1150, verified=50` → 둘 다 정확, 상호 보존 확인.
+
+#### 🔬 실서버에서 직접 확인 — 사용자 로그를 믿지 않고 재현했습니다
+
+계정을 실제로 만들고 **현재 배포된 함수**를 찔렀습니다 (2026-10-18):
+
+```
+STEP B  claimOffer(2001)      → HTTP 200  {"ok":true,"balance":250}
+STEP C  Firestore 문서 필드   → ['lastRewardAt','points','processedTxns',
+                                 'serverLedger.unverified','tx','updatedAt']
+        serverLedger (중첩맵)  → null                       ← 없음
+        'serverLedger.unverified' (점 키) → 250              ← 이렇게 저장됨
+STEP D  requestPayout $5      → HTTP 400
+        "Insufficient verified balance: have 0, need 5000."
+```
+
+**확정:** `61999f5` 커밋에 들어 있던 코드가 정확히 이 버그를 갖고 있습니다.
+
+```
+const ledgerField = verified ? "serverLedger.verified" : "serverLedger.unverified";
+"serverLedger.unverified": FieldValue.increment(-spendUnverified),
+```
+
+#### 📊 피해 범위 — users 10건 전수 조사 결과
+
+| 항목 | 결과 |
+|---|---|
+| 실제 사용자 계정 | **0건** (아직 실사용자 없음) |
+| 점(.) 버그로 손상된 문서 | **1건** (검증용 프로브 계정, 250p) |
+| 나머지 9건 | 전부 이전 익스플로잇 검증 때 만든 위조 계정 (tx 0건 + 50000p) |
+| 현금 유출 | **0원** — 조작 잔액은 규칙이 403으로 차단 |
+
+**돈은 안전합니다.** 다만 고치기 전에는 정상 사용자가 가입해도 출금이 막힙니다.
+
+#### 🛠 복구 도구 — `tools/migrate_ledger.py`
+
+```bash
+python3 tools/migrate_ledger.py                      # 스캔만 (dry-run)
+python3 tools/migrate_ledger.py --repair --apply     # 점(.) 필드 → 중첩 맵 복구
+python3 tools/migrate_ledger.py --seed               # 기존 잔액 이관 미리보기
+```
+
+**모드 2(`--seed`)의 안전 규칙이 중요합니다.** 원장 도입 이전 계정의 잔액을
+`serverLedger.verified` 로 옮기는데, **`tx` 내역이 0건이면 자동 이관하지 않습니다.**
+잔액 조작 공격은 `points` 만 바꾸고 거래 내역을 남기지 않기 때문입니다.
+어느 쪽인지 서버가 구분할 수 없으므로 **돈을 잘못 주는 쪽을 택하지 않습니다.**
+
+실측 결과: 이관 대상 0건, 보류 9건(전부 tx 0건), 복구 대상 1건.
+
+#### 그리고 제 검사 [4]가 거짓 통과했습니다
+
+기존 검사는 "상한 초과 출금이 거부되는가"만 봤습니다. **원장이 고장 나서 0이어도, 조작을 차단해서 0이어도 같은 메시지**가 나옵니다 → 구별 불가.
+
+**수정**: 검사 순서를 바꿔 4단계로 만들었습니다.
+
+1. 정상 보상 청구가 **승인되는가**
+2. `serverLedger` 에 **기록됐는가**
+3. 상한 초과 출금이 **거부되는가**
+4. **정당한 출금이 실제로 성공하는가** ← 이게 고장을 잡아냅니다
+
+그리고 요약 문구를 **방향 인식형**으로 바꿨습니다:
+
+| 상황 | 문구 |
+|---|---|
+| 돈이 나감 | `치명적 — 실제로 돈을 빼낼 수 있습니다` |
+| 모두 차단됨 | `치명적 — 정상 사용자가 출금할 수 없습니다` |
+
+### 🔴 남은 2개 — 함수 재배포 + 손상 원장 복구
+
+**1단계 — 함수 재배포 (원장 수정 반영)**
 
 ```powershell
 cd $HOME\FlutterOfferwallApp
 git pull
 
-# 하드닝된 규칙 적용 + 자동 보안 검증
-powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -ApplyRules
+# 원장 수정 배포 + 자동 검증
+powershell -ExecutionPolicy Bypass -File .\deploy.ps1
 ```
 
-적용하면 `security_regression.py` 의 경고 2건이 ✅ 로 바뀝니다:
+`-ApplyRules` 는 **이번엔 불필요합니다** (규칙은 이미 적용됨).
 
-| 항목 | 현재 | 적용 후 |
-|---|---|---|
-| 조작된 잔액 출금 | ✅ 불가 | ✅ 불가 |
-| 원장 상한 초과 지급 | ✅ 불가 | ✅ 불가 |
-| 잔액 조작 자체 | ⚠️ 가능 (무해) | ✅ 불가 |
-| `serverLedger` 보호 | ⚠️ 미보호 | ✅ 보호 |
+배포 후 STEP 6 에 **`정당한 출금이 실제로 성공한다`** 항목이 ✅ 로 나오면 성공입니다.
+이 항목이 새로 추가된 검사입니다 — 없으면 커밋이 안 내려온 것이니 `git pull` 을 확인하세요.
+
+> **왜 이 항목이 결정적인가**: 기존 검사는 "상한 초과 출금이 거부되는가"만 봤습니다.
+> 원장이 고장 나서 0이어도, 조작을 차단해서 0이어도 **같은 메시지**가 나와 구별이 안 됩니다.
+> 그래서 어제 로그가 전부 초록불인데도 원장은 죽어 있었습니다.
+
+**2단계 — 손상된 문서 복구 (함수 배포 후)**
+
+이미 잘못 저장된 점(.) 필드는 재배포해도 저절로 고쳐지지 않습니다.
+샌드박스에서 복구하거나, 사용자 PC에 Python 이 있으면 실행하세요:
+
+```bash
+python3 tools/migrate_ledger.py                    # 먼저 스캔 (안전)
+python3 tools/migrate_ledger.py --repair --apply   # 실제 복구
+```
+
+현재 확인된 복구 대상은 **1건(250p)** 뿐입니다.
+
+### ✅ 완료된 것
+
+| 항목 | 결과 |
+|---|---|
+| 출금 익스플로잇 차단 (서버 전용 원장 + 강화 규칙) | ✅ 실측 403 / 400 |
+| 잔액 조작 시도 | ✅ HTTP 403 |
+| 조작 잔액으로 출금 | ✅ HTTP 400 |
+| postback 서명 검증 | ✅ 서명없음 / 가짜서명 모두 401 |
+| Node.js 20 → 22 마이그레이션 | ✅ 배포 로그 확인 |
+| 프로브 계정을 포함한 피해 범위 전수 조사 | ✅ users 10건 |
+| 손상 원장 복구 도구 | ✅ `tools/migrate_ledger.py` |
 
 ### 🚨 Node.js 20 지원 종료 — 12일 남음 (수정 완료)
 

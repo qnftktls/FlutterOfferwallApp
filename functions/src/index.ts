@@ -207,16 +207,29 @@ async function creditReward(opts: {
     };
     const nextHistory = [entry, ...history].slice(0, MAX_HISTORY);
 
-    // Increment only the bucket this credit belongs to. FieldValue.increment
-    // keeps concurrent credits from losing each other's writes.
-    const ledgerField = verified ? "serverLedger.verified" : "serverLedger.unverified";
+    // Increment only the bucket this credit belongs to, using a PROPERLY
+    // NESTED object.
+    //
+    // ⚠️ DO NOT use a dotted key like "serverLedger.verified" here. Firestore's
+    // `set(..., { merge: true })` does NOT treat dots as field paths — it
+    // stores a single field literally named "serverLedger.verified", which
+    // `readLedger()` can never find. That bug made every payout impossible
+    // because the ledger always read back as 0. Verified empirically:
+    //   dotted key  -> { "serverLedger.unverified": 250 }   ← wrong
+    //   nested      -> { serverLedger: { unverified: 250 } } ← correct
+    //
+    // Nesting this way also preserves the OTHER bucket: a write that only
+    // mentions `verified` leaves `unverified` intact under merge.
+    const ledgerUpdate = verified
+      ? { serverLedger: { verified: FieldValue.increment(points) } }
+      : { serverLedger: { unverified: FieldValue.increment(points) } };
 
     const update: Record<string, unknown> = {
       points: balance,
       tx: nextHistory,
       updatedAt: FieldValue.serverTimestamp(),
       lastRewardAt: FieldValue.serverTimestamp(),
-      [ledgerField]: FieldValue.increment(points),
+      ...ledgerUpdate,
     };
     if (txnId) {
       const seen: string[] = data.processedTxns ?? [];
@@ -509,8 +522,14 @@ export const requestPayout = onCall(async (request) => {
       {
         // The mirror is reduced by whatever the ledger actually released.
         points: balance - (spendUnverified + spendVerified),
-        "serverLedger.unverified": FieldValue.increment(-spendUnverified),
-        "serverLedger.verified": FieldValue.increment(-spendVerified),
+        // Nested objects, never dotted keys — see the note in creditReward.
+        // Each statement names only one bucket so the other survives the merge.
+        ...(spendUnverified > 0
+          ? { serverLedger: { unverified: FieldValue.increment(-spendUnverified) } }
+          : {}),
+        ...(spendVerified > 0
+          ? { serverLedger: { verified: FieldValue.increment(-spendVerified) } }
+          : {}),
         tx: [entry, ...history].slice(0, MAX_HISTORY),
         updatedAt: FieldValue.serverTimestamp(),
       },

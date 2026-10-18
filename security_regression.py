@@ -62,8 +62,17 @@ results: list[dict] = []
 _WARNED_NO_PYJWT = False
 
 
-def record(name: str, ok: bool, detail: str, fatal: bool = False) -> None:
-    results.append({"check": name, "ok": ok, "detail": detail, "fatal": fatal})
+def record(name: str, ok: bool, detail: str, fatal: bool = False,
+           kind: str = "leak") -> None:
+    """
+    kind='leak'   the problem lets money OUT (attacker wins)
+    kind='broken'  the problem blocks everyone (app is unusable)
+    'broken' is not merely a UX issue: if the ledger never records anything,
+    a legitimate user can never cash out. That is a release blocker too, so it
+    is still fatal — it just needs completely different wording.
+    """
+    results.append({"check": name, "ok": ok, "detail": detail,
+                    "fatal": fatal, "kind": kind})
     mark = f"{GREEN}✅{RESET}" if ok else (f"{RED}❌{RESET}" if fatal else f"{YELLOW}⚠️ {RESET}")
     print(f"  {mark} {name}")
     if detail:
@@ -378,60 +387,109 @@ def check_payout_exploit(token: str | None) -> None:
 
 def check_ledger_deployed(token: str | None) -> None:
     """
-    Confirm the server-side defence shipped.
+    Confirm the ledger WORKS, not merely that it blocks.
 
-    The service account cannot list functions, so we probe behaviour: a payout
-    above MAX_UNVERIFIED_POINTS must be refused even when the mirrored balance
-    claims the user has it. Works without admin rights.
+    A BROKEN ledger (never written) and a WORKING ledger (blocks inflation)
+    both refuse an inflated payout with the same message, so blocking alone
+    proves nothing. Distinguishing them requires doing a legitimate claim
+    first and watching the ledger move — and confirming a real user can
+    actually cash out.
+
+    Order matters:
+      1. a normal claim must be ACCEPTED
+      2. serverLedger must have recorded it
+      3. only then does a refused inflated payout mean anything
+      4. a legitimate payout must SUCCEED (this is what catches a broken ledger)
     """
-    print(f"\n{DIM}4) 서버 전용 원장 배포 여부{RESET}")
+    print(f"\n{DIM}4) 서버 전용 원장이 실제로 작동하는가{RESET}")
     acct = _new_attacker("ledger")
     if not acct:
         record("원장 검증", False, "테스트 계정을 만들 수 없음", fatal=False)
         return
     uid, idtoken = acct
-    # Must clear EVERY earlier guard, or the ledger logic never gets a chance to
-    # run and the probe proves nothing:
-    #   * multiple of 1000 (1000 points = $1)
-    #   * >= 5000 points, because every method has a $5 minimum which is checked
-    #     BEFORE the ledger
-    #   * > MAX_UNVERIFIED_POINTS so the cap is genuinely the binding constraint
-    attempt = 6_000
-    assert attempt % 1000 == 0, "must be a whole number of dollars"
-    assert attempt >= 5_000, "must clear the $5 payout minimum"
-    assert attempt > MAX_UNVERIFIED_POINTS, "must exceed the unverified cap"
+    attempt = 6_000  # whole dollars, clears the $5 minimum, exceeds the 2000 cap
 
     try:
-        # Seed just above the cap. If the rules still let the client write,
-        # the ONLY thing that can refuse this is the ledger logic itself.
-        http(
-            f"{FS}/users/{uid}?updateMask.fieldPaths=points",
-            {"fields": {"points": {"integerValue": str(attempt)}}},
-            {"Authorization": f"Bearer {idtoken}"},
-            method="PATCH",
-        )
-        code, body = http(
-            f"{BASE}/requestPayout",
-            {"data": {"method": "paypal", "points": attempt}},
-            {"Authorization": f"Bearer {idtoken}"},
-        )
+        # --- 1) a normal claim must be ACCEPTED ---
+        code, body = http(f"{BASE}/claimOffer", {"data": {"offerId": "game_puzzle#0"}},
+                          {"Authorization": f"Bearer {idtoken}"})
+        ok_claim = code == 200 and '"ok":true' in body.replace(" ", "")
+        record("정상 보상 청구가 승인된다", ok_claim,
+               "" if ok_claim else f"HTTP {code}: {body[:150]} — 보상 경로가 깨졌습니다",
+               fatal=not ok_claim, kind="broken")
+
+        # --- 2) the ledger must have recorded it ---
+        if token:
+            code, body = http(f"{FS}/users/{uid}",
+                              headers={"Authorization": f"Bearer {token}"})
+            unv = None
+            if code == 200:
+                fields = json.loads(body).get("fields", {})
+                led = fields.get("serverLedger", {}).get("mapValue", {}).get("fields", {})
+                unv = led.get("unverified", {}).get("integerValue")
+            good = unv is not None and int(unv) > 0
+            # A claim was just ACCEPTED (check 1) yet the ledger recorded
+            # nothing. That is direct proof the ledger is broken, so this is
+            # fatal: a legitimate user can never cash out. It is still fatal
+            # even if check 4 later fails to prove it (e.g. the balance never
+            # reaches $5 for unrelated reasons).
+            record("원장에 적립이 기록된다", good,
+                   "" if good else
+                   (f"serverLedger.unverified = {unv}\n"
+                    "원장이 기록되지 않았습니다 → 정상 사용자도 출금 불가 (심각)\n"
+                    "점(dot) 키로 쓰지 않았는지 확인: set({merge:true}) 는\n"
+                    "'serverLedger.x' 를 경로가 아니라 '점이 든 필드명'으로 저장합니다."),
+                   fatal=not good, kind="broken")
+        else:
+            print(f"  {DIM}관리자 권한 없음 — 원장 직접 확인 생략 "
+                  f"(아래 정당한 출금 테스트로 판정){RESET}")
+
+        # --- 3) an inflated payout must be refused ---
+        http(f"{FS}/users/{uid}?updateMask.fieldPaths=points",
+             {"fields": {"points": {"integerValue": str(attempt)}}},
+             {"Authorization": f"Bearer {idtoken}"}, method="PATCH")
+        code, body = http(f"{BASE}/requestPayout",
+                          {"data": {"method": "paypal", "points": attempt}},
+                          {"Authorization": f"Bearer {idtoken}"})
         low = body.lower()
-        # The ledger must be the reason. "Minimum for PayPal is $5" means the
-        # amount never reached the ledger check, so it proves nothing.
         min_check = "minimum for" in low
-        ledger_refusal = ("verified balance" in low or "could not be verified" in low)
-        record(
-            "원장 상한 초과분은 지급 불가",
-            ledger_refusal and code != 200,
-            "" if (ledger_refusal and code != 200) else
-            (f"HTTP {code}: {body[:150]}\n"
-             + ("거부 이유가 최소 출금액이라 원장 검증이 실행되지 않았습니다"
-                if min_check else
-                "원장 로직이 응답에서 확인되지 않음 → 함수 재배포 필요")),
-        )
+        refusal = "verified balance" in low or "could not be verified" in low
+        record("원장 상한 초과분은 지급 불가", refusal and code != 200,
+               "" if (refusal and code != 200) else
+               (f"HTTP {code}: {body[:150]}\n"
+                + ("거부 이유가 최소 출금액이라 원장 검증이 실행되지 않았습니다"
+                   if min_check else "원장 로직이 응답에서 확인되지 않음")))
+
+        # --- 4) a LEGITIMATE payout must succeed ---
+        # This is the check that catches a silently broken ledger. Without it,
+        # "the exploit is blocked" and "everyone is blocked" look identical.
+        balance = 0
+        for oid in ["game_puzzle#1", "game_puzzle#2", "game_coin_master#0",
+                    "game_coin_master#1"]:
+            _, b2 = http(f"{BASE}/claimOffer", {"data": {"offerId": oid}},
+                         {"Authorization": f"Bearer {idtoken}"})
+            try:
+                balance = json.loads(b2)["result"]["balance"]
+            except (KeyError, json.JSONDecodeError):
+                pass
+        if balance and balance >= 5_000:
+            code, body = http(f"{BASE}/requestPayout",
+                              {"data": {"method": "paypal", "points": 5_000}},
+                              {"Authorization": f"Bearer {idtoken}"})
+            paid = code == 200 and '"ok":true' in body.replace(" ", "")
+            record("정당한 출금이 실제로 성공한다", paid,
+                   "" if paid else
+                   (f"HTTP {code}: {body[:170]}\n"
+                    f"정상 사용자가 {balance}p 를 보유해도 출금 불가 → 앱이 작동하지 않습니다\n"
+                    "원장이 적립을 기록하지 못하고 있을 가능성이 높습니다."),
+                   fatal=not paid, kind="broken")
+        else:
+            record("정당한 출금이 실제로 성공한다", False,
+                   f"잔액 부족({balance}p)으로 검증 불가 — 보상 경로 확인 필요", fatal=False)
     finally:
         _cleanup(uid, None, token)
         print(f"       {DIM}테스트 흔적 정리 시도 완료{RESET}")
+
 
 
 def check_postback_signature() -> None:
@@ -477,13 +535,22 @@ def main() -> int:
     else:
         print()
         print("=" * 68)
-        if fatal:
-            print(f"{RED}  치명적 — 실제로 돈을 빼낼 수 있습니다 ({len(fatal)}건){RESET}")
-            for r in fatal:
+        leaks = [r for r in fatal if r.get("kind") != "broken"]
+        broken = [r for r in fatal if r.get("kind") == "broken"]
+        if leaks:
+            print(f"{RED}  치명적 — 실제로 돈을 빼낼 수 있습니다 ({len(leaks)}건){RESET}")
+            for r in leaks:
                 print(f"{RED}   • {r['check']}{RESET}")
-            print(f"{RED}  지금 바로 조치하세요. 배포 전 상태로 출시하면 안 됩니다.{RESET}")
-        else:
+        if broken:
+            print(f"{RED}  치명적 — 정상 사용자가 출금할 수 없습니다 ({len(broken)}건){RESET}")
+            for r in broken:
+                print(f"{RED}   • {r['check']}{RESET}")
+        if fatal:
+            print(f"{RED}  위 항목을 해결하기 전에는 출시하지 마세요.{RESET}")
+        elif warn:
             print(f"{GREEN}  ✅ 출금 익스플로잇 차단 확인 — 알려진 경로로 돈이 나가지 않습니다{RESET}")
+        else:
+            print(f"{GREEN}  ✅ 모두 통과 — 익스플로잇 차단 + 정상 출금 작동{RESET}")
         if warn:
             print(f"{YELLOW}  권고 사항 {len(warn)}건 (돈은 나가지 않음){RESET}")
             for r in warn:
