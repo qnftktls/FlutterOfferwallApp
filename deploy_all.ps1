@@ -129,12 +129,21 @@ if ($LASTEXITCODE -eq 0) {
     $setRc = $LASTEXITCODE
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
 
+    # Never echo the secret. Keep it out of logs / terminal scrollback.
+    $null = $secretVal
+
     if ($setRc -eq 0) {
-        Ok 'secret created (32 random bytes)'
+        Ok 'secret created (32 random bytes) - value intentionally NOT shown'
     } else {
-        Warn 'auto-create failed - register it manually:'
-        Write-Host ("     OFFERWALL_SECRET = " + $secretVal) -ForegroundColor Yellow
-        Info 'manual: firebase functions:secrets:set OFFERWALL_SECRET'
+        Warn 'auto-create failed'
+        Info 'this usually means the project is not on the Blaze plan'
+        Info 'Blaze requires Secret Manager, which needs billing enabled'
+        Write-Host ''
+        Write-Host '  >>> see BLAZE_UPGRADE.md for the fix <<<' -ForegroundColor Yellow
+        Write-Host '  >>> after upgrading, just re-run this script   <<<' -ForegroundColor Yellow
+        Write-Host ''
+        Info 'the script will generate a FRESH secret on the next run'
+        exit 1
     }
 }
 

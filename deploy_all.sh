@@ -89,11 +89,18 @@ else
   SECRET_VAL="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   if printf '%s' "$SECRET_VAL" | firebase functions:secrets:set OFFERWALL_SECRET \
         --project "$PROJECT" --data-file=- >/dev/null 2>&1; then
-    ok "시크릿 생성 완료"
+    ok "시크릿 생성 완료 (값은 의도적으로 출력하지 않음)"
   else
-    warn "자동 등록 실패 — 아래 값을 수동 등록하세요:"
-    printf '     OFFERWALL_SECRET = %s\n' "$SECRET_VAL"
-    info "수동: firebase functions:secrets:set OFFERWALL_SECRET"
+    unset SECRET_VAL
+    warn "자동 등록 실패"
+    info "보통 프로젝트가 Blaze 플랜이 아닐 때 발생합니다"
+    info "Blaze가 필요합니다 (Secret Manager 활성화 조건)"
+    echo
+    printf "  ${Y}>>> BLAZE_UPGRADE.md 를 참고하세요 <<<${N}\n"
+    printf "  ${Y}>>> 업그레이드 후 이 스크립트를 재실행하세요 <<<${N}\n"
+    echo
+    info "다음 실행 시 새 시크릿이 자동 생성됩니다"
+    exit 1
   fi
 fi
 
