@@ -4,6 +4,23 @@ A hybrid monetization home screen built with **Flutter**, targeting **Android an
 from a single codebase** (with a Flutter Web preview). Ported 1:1 from the earlier
 Android-native Kotlin build, keeping the same structure, palette, and JS bridge contract.
 
+---
+
+## 🆕 Features (Freecash-style)
+
+| # | Feature | Where |
+|---|---------|-------|
+| 1 | **Login / signup** (Firebase Auth email+password, guest mode, password reset) | `lib/services/auth_service.dart`, `lib/screens/auth_screen.dart`, Profile tab |
+| 2 | **Real payout integration** (backend POST hook + demo simulator, points deduction) | `lib/services/payout_service.dart`, `lib/config/app_config.dart` → `PayoutConfig` |
+| 3 | **Signed release APK** | `android/app/build.gradle.kts` (release keystore via `key.properties`) |
+| 4 | **Multi-language (한국어 / English)** — runtime switch, persisted | `lib/l10n/app_localizations.dart`, `lib/services/settings_repository.dart`, Profile tab |
+| 5 | **Real offerwall provider config** (Ayet / AdGem / Tapjoy / Notik / Lootably) | `lib/config/app_config.dart` → `OfferwallProvider`, `OfferwallConfig` |
+
+### Bottom navigation
+**Earn** (offerwall + offer list) · **Games** (milestone missions) · **Cashout** (payout methods) · **Profile** (account, language, history).
+
+---
+
 ```
 ┌───────────────────────────────────────────┐
 │  Rewards Hub                    1,250 pts  │  ← header (app name + live balance)
