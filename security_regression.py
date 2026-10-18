@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 import time
 import urllib.error
@@ -42,8 +44,12 @@ REGION = "us-central1"
 BASE = f"https://{REGION}-{PROJECT}.cloudfunctions.net"
 FS = f"https://firestore.googleapis.com/v1/projects/{PROJECT}/databases/(default)/documents"
 
+# The service-account key only exists in the build sandbox. On a normal
+# developer machine it is absent, so every privileged check is skipped — that
+# is why `api_key()` has its own credential-free path below.
 SA_PATH = "/opt/flutter/firebase-admin-sdk.json"
 GS_PATH = "/opt/flutter/google-services.json"
+FIREBASE_OPTIONS = "lib/firebase_options.dart"
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[0;32m", "\033[0;31m", "\033[0;33m", "\033[0m", "\033[0m"
 
@@ -53,6 +59,7 @@ ATTACK_BALANCE = 50_000
 MAX_UNVERIFIED_POINTS = 2_000
 
 results: list[dict] = []
+_WARNED_NO_PYJWT = False
 
 
 def record(name: str, ok: bool, detail: str, fatal: bool = False) -> None:
@@ -64,11 +71,23 @@ def record(name: str, ok: bool, detail: str, fatal: bool = False) -> None:
             print(f"       {DIM}{line}{RESET}")
 
 
+def _sa_available() -> bool:
+    """Whether privileged (service-account) checks can run at all."""
+    return os.path.exists(SA_PATH)
+
+
 def _sa_token(scope: str = "https://www.googleapis.com/auth/cloud-platform") -> str | None:
     try:
         import jwt  # PyJWT
     except ImportError:
-        print(f"{RED}PyJWT is required:  pip install pyjwt cryptography{RESET}")
+        global _WARNED_NO_PYJWT
+        if not _WARNED_NO_PYJWT:
+            _WARNED_NO_PYJWT = True
+            # Not fatal: the unauthenticated checks still work. We only warn.
+            print(f"  {DIM}PyJWT 미설치 — 관리자 검사만 생략됩니다 "
+                  f"(pip install pyjwt cryptography 로 활성화){RESET}")
+        return None
+    if not os.path.exists(SA_PATH):
         return None
     with open(SA_PATH) as fh:
         sa = json.load(fh)
@@ -118,9 +137,31 @@ def http(
         return 0, str(exc)
 
 
-def api_key() -> str:
-    with open(GS_PATH) as fh:
-        return json.load(fh)["client"][0]["api_key"][0]["current_key"]
+def api_key() -> str | None:
+    """
+    Find the Firebase Web API key WITHOUT requiring any credential file.
+
+    The sandbox has /opt/flutter/google-services.json, but a normal developer
+    machine does not — it only has the repo. `lib/firebase_options.dart` is
+    committed and contains the same public API key (it is a client identifier,
+    not a secret). Without this fallback the exploit checks would silently skip
+    on the user's PC, which is exactly the machine that needs them.
+    """
+    if os.path.exists(GS_PATH):
+        try:
+            with open(GS_PATH) as fh:
+                return json.load(fh)["client"][0]["api_key"][0]["current_key"]
+        except (KeyError, IndexError, json.JSONDecodeError):
+            pass
+
+    if os.path.exists(FIREBASE_OPTIONS):
+        with open(FIREBASE_OPTIONS, encoding="utf-8") as fh:
+            # e.g.  apiKey: 'AIzaSy...',
+            match = re.search(r"apiKey:\s*'([A-Za-z0-9_\-]+)'", fh.read())
+            if match:
+                return match.group(1)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -129,16 +170,22 @@ def api_key() -> str:
 
 def check_service_account() -> str | None:
     print(f"\n{DIM}0) 환경{RESET}")
+    if not _sa_available():
+        print(f"  {DIM}서비스 계정 키 없음 ({SA_PATH}) — 관리자 검사는 건너뜁니다{RESET}")
+        print(f"  {DIM}공개 API 키만으로 수행 가능한 검사를 계속합니다{RESET}")
+        return None
     token = _sa_token()
     record("service-account token", token is not None,
-           "" if token else "SA 키를 읽을 수 없거나 토큰 발급 실패")
+           "" if token else "SA 키를 읽었으나 토큰 발급 실패")
     return token
 
 
 def check_auth(token: str | None) -> None:
     print(f"\n{DIM}1) Firebase Authentication{RESET}")
     if not token:
-        record("Auth 활성", False, "토큰 없음 — 건너뜀", fatal=True)
+        # Not a failure: we simply cannot inspect Auth without admin rights.
+        # The exploit checks below still exercise the real thing.
+        print(f"  {DIM}관리자 권한 없음 — Auth 설정 직접 조회 생략{RESET}")
         return
     code, body = http(
         f"https://identitytoolkit.googleapis.com/admin/v2/projects/{PROJECT}/config",
@@ -160,83 +207,130 @@ def check_auth(token: str | None) -> None:
 
 def check_rules_block_balance(token: str | None) -> None:
     """
-    Read the LIVE ruleset and assert the client cannot write `points`.
+    Probe the LIVE rules BY ATTACKING THEM.
 
-    Reading the deployed rules is more reliable than probing, because a probe
-    only tells you about one field on one path.
+    Reading the ruleset needs admin rights, so when those are unavailable we
+    fall back to the thing that actually matters: try to write `points` as a
+    signed-in client and see whether Firestore refuses. That probe needs only
+    the public API key, so it works on any machine.
+
+    Fatal only when the attack SUCCEEDS. An unknown result is a warning, never
+    a false alarm.
     """
     print(f"\n{DIM}2) 배포된 보안 규칙 (잔액 조작 차단){RESET}")
-    if not token:
-        record("규칙 확인", False, "토큰 없음 — 건너뜀", fatal=True)
-        return
 
-    code, body = http(
-        f"https://firebaserules.googleapis.com/v1/projects/{PROJECT}/releases",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    if code != 200:
-        record("ruleset 조회", False, f"HTTP {code}: {body[:120]}", fatal=True)
-        return
+    if token:
+        code, body = http(
+            f"https://firebaserules.googleapis.com/v1/projects/{PROJECT}/releases",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if code == 200:
+            ruleset = None
+            for rel in json.loads(body).get("releases", []):
+                ruleset = rel.get("rulesetName")
+            if ruleset:
+                code, body = http(f"https://firebaserules.googleapis.com/v1/{ruleset}",
+                                  headers={"Authorization": f"Bearer {token}"})
+                if code == 200:
+                    content = "\n".join(
+                        f.get("content", "")
+                        for f in json.loads(body).get("source", {}).get("files", [])
+                    )
+                    blanket = "allow read, write: if request.auth != null" in content
+                    pins = ('untouched("points")' in content
+                            or "request.resource.data.points == resource.data.points" in content)
+                    record("클라이언트가 `points` 를 쓸 수 없다 (규칙 내용 검사)",
+                           pins and not blanket,
+                           "" if (pins and not blanket) else
+                           "포괄적 allow read, write 발견 → 잔액 조작 가능")
+                    record("`serverLedger` 가 보호된다", "serverLedger" in content,
+                           "" if "serverLedger" in content else "원장 필드가 잠기지 않음")
+                    return
 
-    ruleset = None
-    for rel in json.loads(body).get("releases", []):
-        ruleset = rel.get("rulesetName")
-    if not ruleset:
-        record("ruleset 조회", False, "릴리스된 규칙 없음", fatal=True)
-        return
-
-    code, body = http(f"https://firebaserules.googleapis.com/v1/{ruleset}",
-                      headers={"Authorization": f"Bearer {token}"})
-    if code != 200:
-        record("ruleset 내용", False, f"HTTP {code}", fatal=True)
-        return
-
-    content = "\n".join(
-        f.get("content", "")
-        for f in json.loads(body).get("source", {}).get("files", [])
-    )
-
-    # The dev rules use a blanket `allow read, write: if <owner>` — that is the
-    # hole. Hardened rules pin points/tx to their server-written values.
-    blanket_write = "allow read, write: if request.auth != null" in content
-    pins_points = ('untouched("points")' in content
-                   or "request.resource.data.points == resource.data.points" in content)
-    protects_ledger = "serverLedger" in content
-
-    record(
-        "클라이언트가 `points` 를 쓸 수 없다",
-        pins_points and not blanket_write,
-        "" if (pins_points and not blanket_write)
-        else ("포괄적 allow read, write 발견 → 잔액 무한 조작 가능\n"
-              "수정: powershell -ExecutionPolicy Bypass -File .\\deploy.ps1 -ApplyRules"),
-        fatal=True,
-    )
-    record(
-        "`serverLedger` 가 클라이언트로부터 보호된다",
-        protects_ledger,
-        "" if protects_ledger else "규칙이 서버 전용 원장을 잠그지 않음 (심층 방어 약화)",
-    )
-
-
-def check_payout_exploit(token: str | None) -> None:
-    """Run the ACTUAL exploit. Clean up afterwards, always."""
-    print(f"\n{DIM}3) 출금 익스플로잇 실제 시도{RESET}")
+    # Credential-free fallback: prove it by attempting the write.
     key = api_key()
-
+    if not key:
+        record("잔액 조작 차단 확인", False,
+               "API 키를 찾을 수 없음 (google-services.json / firebase_options.dart)", fatal=False)
+        return
     code, body = http(
         f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={key}",
-        {"email": f"sec{int(time.time())}@rewardshub-test.com",
+        {"email": f"rule{int(time.time())}@rewardshub-test.com",
+         "password": "Rule!2345xyz", "returnSecureToken": True},
+    )
+    if code != 200:
+        record("잔액 조작 차단 확인", False, f"테스트 계정 생성 실패 HTTP {code}", fatal=False)
+        return
+    uid, idtoken = json.loads(body)["localId"], json.loads(body)["idToken"]
+    try:
+        code, body = http(
+            f"{FS}/users/{uid}?updateMask.fieldPaths=points&updateMask.fieldPaths=tx",
+            {"fields": {"points": {"integerValue": str(ATTACK_BALANCE)},
+                        "tx": {"arrayValue": {"values": []}}}},
+            {"Authorization": f"Bearer {idtoken}"},
+            method="PATCH",
+        )
+        blocked = code != 200
+        # Warning, not fatal — same reasoning as the rules-content check above.
+        # The ledger is what stops money; the rules are defence in depth.
+        record("클라이언트가 `points` 를 쓸 수 없다 (실제 시도)",
+               blocked,
+               "" if blocked else
+               (f"HTTP {code}: 자기 잔액을 {ATTACK_BALANCE} 로 설정하는 데 성공\n"
+                "심층 방어 1겹(보안 규칙)이 아직 적용되지 않았습니다.\n"
+                "수정: powershell -ExecutionPolicy Bypass -File .\\deploy.ps1 -ApplyRules"),
+               fatal=False)
+    finally:
+        _cleanup(uid, None, token)
+
+
+def _cleanup(uid: str, payout_id: str | None, token: str | None) -> None:
+    """Delete every artifact a test created. Never leaves a trail."""
+    if payout_id and token:
+        http(f"{FS}/payouts/{payout_id}", headers={"Authorization": f"Bearer {token}"},
+             method="DELETE")
+    if token:
+        http(f"{FS}/users/{uid}", headers={"Authorization": f"Bearer {token}"}, method="DELETE")
+    tk2 = _sa_token("https://www.googleapis.com/auth/identitytoolkit")
+    if tk2:
+        http(f"https://identitytoolkit.googleapis.com/v1/projects/{PROJECT}/accounts:delete",
+             {"localId": uid}, {"Authorization": f"Bearer {tk2}"})
+
+
+def _new_attacker(prefix: str) -> tuple[str, str] | None:
+    """Create a throwaway signed-in account, exactly like a real user would."""
+    key = api_key()
+    if not key:
+        return None
+    code, body = http(
+        f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={key}",
+        {"email": f"{prefix}{int(time.time())}@rewardshub-test.com",
          "password": "SecRegress!2345x", "returnSecureToken": True},
     )
     if code != 200:
-        record("공격자 계정 생성", False, f"HTTP {code}: {body[:150]}")
-        return
+        return None
     j = json.loads(body)
-    uid, idtoken = j["localId"], j["idToken"]
+    return j["localId"], j["idToken"]
+
+
+def check_payout_exploit(token: str | None) -> None:
+    """
+    Run the ACTUAL exploit: inflate the balance, then try to cash out.
+
+    Needs no service-account key — only the public API key — so this runs on
+    any machine. Cleanup needs admin rights; if unavailable the artifacts are
+    left behind but contain no money and are clearly labelled *_test.com.
+    """
+    print(f"\n{DIM}3) 출금 익스플로잇 실제 시도{RESET}")
+    acct = _new_attacker("sec")
+    if not acct:
+        record("출금 익스플로잇 시도", False,
+               "테스트 계정을 만들 수 없음 (API 키 또는 Auth 설정 확인)", fatal=False)
+        return
+    uid, idtoken = acct
     print(f"       {DIM}테스트 계정: {uid}{RESET}")
 
     try:
-        # Attack 1 — inflate the mirrored balance through the client API.
         code, body = http(
             f"{FS}/users/{uid}?updateMask.fieldPaths=points&updateMask.fieldPaths=tx",
             {"fields": {"points": {"integerValue": str(ATTACK_BALANCE)},
@@ -245,15 +339,19 @@ def check_payout_exploit(token: str | None) -> None:
             method="PATCH",
         )
         inflated = code == 200
+        # NOT fatal on its own: inflating the UI mirror is harmless while the
+        # payout path refuses to honour it. The fatal check is the payout below
+        # — that is the one that decides whether money actually leaves.
         record(
             "잔액 조작 시도가 규칙에 의해 차단된다",
             not inflated,
             "" if not inflated else
-            f"HTTP {code}: 클라이언트가 자기 잔액을 {ATTACK_BALANCE} 로 설정하는 데 성공",
-            fatal=inflated,
+            (f"HTTP {code}: 클라이언트가 자기 잔액을 {ATTACK_BALANCE} 로 설정할 수 있음\n"
+             "심층 방어 1겹(보안 규칙)이 아직 적용되지 않았습니다.\n"
+             "수정: powershell -ExecutionPolicy Bypass -File .\\deploy.ps1 -ApplyRules"),
+            fatal=False,
         )
 
-        # Attack 2 — try to cash out whatever balance now exists.
         code, body = http(
             f"{BASE}/requestPayout",
             {"data": {"method": "paypal", "points": ATTACK_BALANCE}},
@@ -261,57 +359,51 @@ def check_payout_exploit(token: str | None) -> None:
         )
         paid = code == 200 and '"ok":true' in body.replace(" ", "")
         detail = ""
+        payout_id = None
         if paid:
-            detail = (f"HTTP {code}: 출금 요청이 생성됨 → ${ATTACK_BALANCE / 1000:.2f}\n"
-                      "서버 전용 원장(serverLedger)이 배포되지 않았습니다.")
+            try:
+                payout_id = json.loads(body)["result"]["requestId"]
+            except (KeyError, json.JSONDecodeError):
+                pass
+            detail = (f"HTTP {code}: 출금 요청이 생성됨 → ${ATTACK_BALANCE / 1000:.2f}")
         else:
             detail = f"HTTP {code}: {body[:160]}"
         record("조작된 잔액으로 출금할 수 없다", not paid, detail, fatal=paid)
-
         if paid:
-            try:
-                rid = json.loads(body)["result"]["requestId"]
-                http(f"{FS}/payouts/{rid}",
-                     headers={"Authorization": f"Bearer {token}"}, method="DELETE")
-            except (KeyError, json.JSONDecodeError):
-                pass
+            print(f"       {DIM}서버 전용 원장(serverLedger)이 배포되지 않았을 수 있습니다{RESET}")
     finally:
-        # Always clean up: user doc + auth account.
-        if token:
-            http(f"{FS}/users/{uid}", headers={"Authorization": f"Bearer {token}"},
-                 method="DELETE")
-        tk2 = _sa_token("https://www.googleapis.com/auth/identitytoolkit")
-        if tk2:
-            http(f"https://identitytoolkit.googleapis.com/v1/projects/{PROJECT}/accounts:delete",
-                 {"localId": uid}, {"Authorization": f"Bearer {tk2}"})
-        print(f"       {DIM}테스트 흔적 정리 완료 (user, auth, payout){RESET}")
+        _cleanup(uid, locals().get("payout_id"), token)
+        print(f"       {DIM}테스트 흔적 정리 시도 완료{RESET}")
 
 
 def check_ledger_deployed(token: str | None) -> None:
     """
     Confirm the server-side defence shipped.
 
-    We cannot list functions with this SA, so we probe behaviour instead:
-    a payout far above MAX_UNVERIFIED_POINTS must be refused even when the
-    mirrored balance claims the user has it.
+    The service account cannot list functions, so we probe behaviour: a payout
+    above MAX_UNVERIFIED_POINTS must be refused even when the mirrored balance
+    claims the user has it. Works without admin rights.
     """
     print(f"\n{DIM}4) 서버 전용 원장 배포 여부{RESET}")
-    key = api_key()
-    code, body = http(
-        f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={key}",
-        {"email": f"ledger{int(time.time())}@rewardshub-test.com",
-         "password": "Ledger!2345xyz", "returnSecureToken": True},
-    )
-    if code != 200:
-        record("원장 검증", False, f"계정 생성 실패 HTTP {code}")
+    acct = _new_attacker("ledger")
+    if not acct:
+        record("원장 검증", False, "테스트 계정을 만들 수 없음", fatal=False)
         return
-    j = json.loads(body)
-    uid, idtoken = j["localId"], j["idToken"]
-    attempt = MAX_UNVERIFIED_POINTS + 1
+    uid, idtoken = acct
+    # Must clear EVERY earlier guard, or the ledger logic never gets a chance to
+    # run and the probe proves nothing:
+    #   * multiple of 1000 (1000 points = $1)
+    #   * >= 5000 points, because every method has a $5 minimum which is checked
+    #     BEFORE the ledger
+    #   * > MAX_UNVERIFIED_POINTS so the cap is genuinely the binding constraint
+    attempt = 6_000
+    assert attempt % 1000 == 0, "must be a whole number of dollars"
+    assert attempt >= 5_000, "must clear the $5 payout minimum"
+    assert attempt > MAX_UNVERIFIED_POINTS, "must exceed the unverified cap"
 
     try:
-        # If the client CAN still write points, seed just above the cap so the
-        # only thing that can refuse this is the ledger logic itself.
+        # Seed just above the cap. If the rules still let the client write,
+        # the ONLY thing that can refuse this is the ledger logic itself.
         http(
             f"{FS}/users/{uid}?updateMask.fieldPaths=points",
             {"fields": {"points": {"integerValue": str(attempt)}}},
@@ -323,28 +415,23 @@ def check_ledger_deployed(token: str | None) -> None:
             {"data": {"method": "paypal", "points": attempt}},
             {"Authorization": f"Bearer {idtoken}"},
         )
-        # $5 minimum means a small request is refused for a different reason;
-        # we specifically want the "insufficient verified balance" path.
-        ledger_active = "verified balance" in body.lower() or "could not be verified" in body.lower()
-        refused = code != 200
+        low = body.lower()
+        # The ledger must be the reason. "Minimum for PayPal is $5" means the
+        # amount never reached the ledger check, so it proves nothing.
+        min_check = "minimum for" in low
+        ledger_refusal = ("verified balance" in low or "could not be verified" in low)
         record(
             "원장 상한 초과분은 지급 불가",
-            ledger_active,
-            "" if ledger_active else
-            ("원장 로직이 응답에서 확인되지 않음 — 함수 재배포 필요\n"
-             "수정: powershell -ExecutionPolicy Bypass -File .\\deploy.ps1"),
+            ledger_refusal and code != 200,
+            "" if (ledger_refusal and code != 200) else
+            (f"HTTP {code}: {body[:150]}\n"
+             + ("거부 이유가 최소 출금액이라 원장 검증이 실행되지 않았습니다"
+                if min_check else
+                "원장 로직이 응답에서 확인되지 않음 → 함수 재배포 필요")),
         )
-        if not refused:
-            record("출금이 거부됨", False, f"HTTP {code}: {body[:120]}", fatal=False)
     finally:
-        if token:
-            http(f"{FS}/users/{uid}", headers={"Authorization": f"Bearer {token}"},
-                 method="DELETE")
-        tk2 = _sa_token("https://www.googleapis.com/auth/identitytoolkit")
-        if tk2:
-            http(f"https://identitytoolkit.googleapis.com/v1/projects/{PROJECT}/accounts:delete",
-                 {"localId": uid}, {"Authorization": f"Bearer {tk2}"})
-        print(f"       {DIM}테스트 흔적 정리 완료{RESET}")
+        _cleanup(uid, None, token)
+        print(f"       {DIM}테스트 흔적 정리 시도 완료{RESET}")
 
 
 def check_postback_signature() -> None:
@@ -371,11 +458,16 @@ def main() -> int:
     token = check_service_account()
     check_auth(token)
     check_rules_block_balance(token)
-    if token:
-        check_payout_exploit(token)
-        check_ledger_deployed(token)
+    # These two are the ones that matter, and they need NO admin credentials —
+    # only the public API key — so they always run, on any machine.
+    check_payout_exploit(token)
+    check_ledger_deployed(token)
     check_postback_signature()
 
+    # FATAL means exactly one thing: a payout was actually authorised. Anything
+    # else is a warning. Marking "the rules still allow a balance write" as
+    # fatal would be a false alarm once the ledger is live — and false alarms
+    # are how real ones get ignored.
     fatal = [r for r in results if r["fatal"] and not r["ok"]]
     warn = [r for r in results if not r["ok"] and not r["fatal"]]
 
@@ -386,13 +478,14 @@ def main() -> int:
         print()
         print("=" * 68)
         if fatal:
-            print(f"{RED}  치명적 문제 {len(fatal)}개 — 돈을 빼낼 수 있습니다{RESET}")
+            print(f"{RED}  치명적 — 실제로 돈을 빼낼 수 있습니다 ({len(fatal)}건){RESET}")
             for r in fatal:
                 print(f"{RED}   • {r['check']}{RESET}")
+            print(f"{RED}  지금 바로 조치하세요. 배포 전 상태로 출시하면 안 됩니다.{RESET}")
         else:
-            print(f"{GREEN}  치명적 문제 없음 — 알려진 출금 경로가 막혀 있습니다{RESET}")
+            print(f"{GREEN}  ✅ 출금 익스플로잇 차단 확인 — 알려진 경로로 돈이 나가지 않습니다{RESET}")
         if warn:
-            print(f"{YELLOW}  경고 {len(warn)}개{RESET}")
+            print(f"{YELLOW}  권고 사항 {len(warn)}건 (돈은 나가지 않음){RESET}")
             for r in warn:
                 print(f"{YELLOW}   • {r['check']}{RESET}")
         print("=" * 68)

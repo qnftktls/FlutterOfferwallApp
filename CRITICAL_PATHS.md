@@ -239,17 +239,59 @@ python verify_deployment.py
 
 ## 4. 남은 작업 순서
 
-### 🔴 지금 즉시 (터미널) — 익스플로잇 차단
+### ✅ 완료 (STEP 3 배포 + 원장 검증)
+
+```
+[3] 잔액 조작 시도       → HTTP 200  (규칙은 아직 열려 있음)
+[3] 조작된 잔액으로 출금  → HTTP 400
+    {"message":"Insufficient verified balance: have 0, need 50000."}
+```
+
+**서버 전용 원장이 실제로 돈을 막았습니다.** 보안 규칙이 아직 적용되지 않았는데도
+인출이 불가능해졌습니다 — 2겹 방어가 설계대로 작동합니다.
+
+### 🔴 남은 1개 — 보안 규칙 적용 (1겹)
+
 ```powershell
 cd $HOME\FlutterOfferwallApp
 git pull
 
-# 1) 서버 전용 원장 + 출금 상한 반영 (2겹 방어 활성화)
-powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -TimeoutSeconds 1200
-
-# 2) 하드닝된 보안 규칙 적용 ← 클라이언트의 잔액 조작을 근본 차단
+# 하드닝된 규칙 적용 + 자동 보안 검증
 powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -ApplyRules
 ```
+
+적용하면 `security_regression.py` 의 경고 2건이 ✅ 로 바뀝니다:
+
+| 항목 | 현재 | 적용 후 |
+|---|---|---|
+| 조작된 잔액 출금 | ✅ 불가 | ✅ 불가 |
+| 원장 상한 초과 지급 | ✅ 불가 | ✅ 불가 |
+| 잔액 조작 자체 | ⚠️ 가능 (무해) | ✅ 불가 |
+| `serverLedger` 보호 | ⚠️ 미보호 | ✅ 보호 |
+
+### 🚨 Node.js 20 지원 종료 — 12일 남음 (수정 완료)
+
+배포 로그에 이 경고가 있었습니다:
+
+```
+!  functions: Runtime Node.js 20 was deprecated on 2026-04-30 and will be
+   decommissioned on 2026-10-30, after which you will not be able to deploy
+   without upgrading.
+```
+
+**2026-10-30 이후 함수 배포가 전면 차단됩니다.** 이미 수정했습니다:
+
+| 파일 | 변경 |
+|---|---|
+| `firebase.json` | `"runtime": "nodejs20"` → `"nodejs22"` |
+| `functions/package.json` | `"node": "20"` → `"node": "22"` |
+
+Node.js 22가 GA이고 약 2년 지원이 남아 있어 안전한 선택입니다.
+**다음 배포에서 자동으로 적용됩니다** (별도 명령 불필요).
+
+> 참고: `firebase-functions` v6 와 `firebase-admin` v12 는 Node 22를 지원합니다.
+> `tsconfig` 의 `target: es2020` 도 그대로 유효합니다 — 검증 완료.
+
 
 ### 적용 후 검증 (터미널)
 ```powershell
