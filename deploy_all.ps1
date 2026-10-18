@@ -1,15 +1,25 @@
 #Requires -Version 5.1
+
 <#
   Rewards Hub - Cloud Functions one-shot deploy (Windows PowerShell)
   -------------------------------------------------------------------
   Usage:
       powershell -ExecutionPolicy Bypass -File .\deploy_all.ps1
 
+      # only after game milestones are moved to the server path:
+      powershell -ExecutionPolicy Bypass -File .\deploy_all.ps1 -ApplyRules
+
   Prereqs:
       - Node.js 20+           https://nodejs.org
       - firebase-tools        npm install -g firebase-tools
       - firebase login        (sign in with your OWN Google account)
 #>
+
+param(
+    # Apply the anti-fraud Firestore rules (points/tx become server-only).
+    # Default OFF: any screen that still credits points locally would break.
+    [switch]$ApplyRules
+)
 
 $ErrorActionPreference = 'Continue'
 $Project = 'flutter-offerwall-app'
@@ -151,41 +161,61 @@ if ($LASTEXITCODE -eq 0) {
 Step "STEP 6 - deploy Cloud Functions ($Project)"
 
 Info 'if asked to enable APIs -> click "Enable" (first run only)'
-Info 'this takes 3-5 minutes, please wait...'
+Info 'this takes 3-5 minutes. output streams live below.'
 Write-Host ""
 
-& firebase deploy --only functions --project $Project 2>&1 | Select-Object -Last 30
+# NOTE: do NOT pipe through Select-Object here. That buffers everything until
+# the command exits, so the screen looks frozen for minutes (the old bug).
+# Stream line-by-line and keep a copy in deploy.log.
+$logPath = Join-Path $Root 'deploy.log'
+& firebase deploy --only functions --project $Project --force 2>&1 |
+    Tee-Object -FilePath $logPath |
+    ForEach-Object { Write-Host $_ }
+$deployRc = $LASTEXITCODE
 
-if ($LASTEXITCODE -ne 0) {
+if ($deployRc -ne 0) {
     Write-Host ""
-    Bad 'function deploy failed (see log above)'
+    Bad 'function deploy failed (see log above / deploy.log)'
     Info "tip: 'API has not been used' -> enable it in the console, then re-run"
     exit 1
 }
 Ok 'functions deployed'
 
 # ---------------------------------------------------------------- STEP 7
-Step 'STEP 7 - apply anti-fraud Firestore rules'
+Step 'STEP 7 - anti-fraud Firestore rules (OPT-IN)'
 
-$rules = Join-Path $Root 'firestore.rules'
-$anti  = Join-Path $Root 'firestore.rules.antifraud'
-$bak   = Join-Path $Root 'firestore.rules.clientonly.bak'
-
-if (Test-Path -LiteralPath $anti) {
-    Copy-Item -LiteralPath $rules -Destination $bak  -Force
-    Copy-Item -LiteralPath $anti  -Destination $rules -Force
-
-    & firebase deploy --only firestore:rules --project $Project 2>&1 | Select-Object -Last 8
-
-    if ($LASTEXITCODE -eq 0) {
-        Ok 'anti-fraud rules deployed (points/tx are now server-only)'
-        Info "backup saved: firestore.rules.clientonly.bak"
-    } else {
-        Warn 'rules deploy failed - restoring client-writable version'
-        Copy-Item -LiteralPath $bak -Destination $rules -Force
-    }
+# WHY OPT-IN: the anti-fraud rules make `points`/`tx` server-only. Any screen
+# that still credits points LOCALLY would break. As of this build the offer
+# detail screen is server-backed, but game milestones are not converted yet.
+# Applying the rules too early = game rewards silently stop working.
+# Run with:  .\deploy_all.ps1 -ApplyRules
+if (-not $ApplyRules) {
+    Warn 'SKIPPED (safe default) - client-writable rules stay in place'
+    Info 'the app keeps working end-to-end; functions are already live'
+    Info 'to lock the balance down, first convert game milestones to the'
+    Info 'server path, then re-run with:  .\deploy_all.ps1 -ApplyRules'
 } else {
-    Info 'firestore.rules.antifraud not found - skipped'
+    $rules = Join-Path $Root 'firestore.rules'
+    $anti  = Join-Path $Root 'firestore.rules.antifraud'
+    $bak   = Join-Path $Root 'firestore.rules.clientonly.bak'
+
+    if (Test-Path -LiteralPath $anti) {
+        Copy-Item -LiteralPath $rules -Destination $bak  -Force
+        Copy-Item -LiteralPath $anti  -Destination $rules -Force
+
+        & firebase deploy --only firestore:rules --project $Project --force 2>&1 |
+            ForEach-Object { Write-Host $_ }
+
+        if ($LASTEXITCODE -eq 0) {
+            Ok 'anti-fraud rules deployed (points/tx are now server-only)'
+            Info 'backup saved: firestore.rules.clientonly.bak'
+        } else {
+            Warn 'rules deploy failed - restoring client-writable version'
+            Copy-Item -LiteralPath $bak -Destination $rules -Force
+        }
+    } else {
+        Info 'firestore.rules.antifraud not found - skipped'
+    }
 }
 
 # ---------------------------------------------------------------- STEP 8

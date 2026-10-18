@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../config/app_config.dart';
 import '../data/sample_data.dart';
 import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
 import '../services/points_repository.dart';
+import '../services/reward_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offer_card.dart';
 import 'earn_screen.dart' show SnackBarHelper;
@@ -82,6 +84,9 @@ class _MissionCard extends StatefulWidget {
 class _MissionCardState extends State<_MissionCard> {
   /// Indices of milestones already claimed.
   final Set<int> _claimed = <int>{};
+
+  /// Indices currently awaiting a server verdict (spinner on the button).
+  final Set<int> _busy = <int>{};
 
   @override
   Widget build(BuildContext context) {
@@ -210,7 +215,7 @@ class _MissionCardState extends State<_MissionCard> {
                   SizedBox(
                     height: 32,
                     child: FilledButton(
-                      onPressed: done ? null : () => _claim(i),
+                      onPressed: (done || _busy.contains(i)) ? null : () => _claim(i),
                       style: FilledButton.styleFrom(
                         backgroundColor: accent,
                         foregroundColor: Colors.white,
@@ -221,7 +226,16 @@ class _MissionCardState extends State<_MissionCard> {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      child: Text(done ? l.t('done') : l.t('claim')),
+                      child: _busy.contains(i)
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : Text(done ? l.t('done') : l.t('claim')),
                     ),
                   ),
                 ],
@@ -233,12 +247,47 @@ class _MissionCardState extends State<_MissionCard> {
     );
   }
 
-  void _claim(int index) {
+  Future<void> _claim(int index) async {
     final AppLocalizations l = context.l10n;
     final Mission m = widget.mission;
     final MissionMilestone ms = m.milestones[index];
-    if (_claimed.contains(index)) return;
+    if (_claimed.contains(index) || _busy.contains(index)) return;
 
+    // ---- Server-verified path (production / anti-fraud) ----
+    // The client sends only "<missionId>#<index>"; the SERVER looks up the
+    // amount. Patching the APK to claim a bigger reward changes nothing.
+    if (SecurityConfig.useServerVerification &&
+        RewardService.instance.isAvailable) {
+      setState(() => _busy.add(index));
+      final ClaimResult res = await RewardService.instance.claimOffer(
+        offerId: '${m.id}#$index',
+      );
+      if (!mounted) return;
+      setState(() => _busy.remove(index));
+
+      if (res.ok) {
+        setState(() => _claimed.add(index));
+        SnackBarHelper.showReward(
+          context,
+          l.f('game_reward', <String, Object?>{
+            'game': m.game,
+            'pts': PointsMath.formatPoints(ms.points),
+          }),
+        );
+        return;
+      }
+
+      if (res.fromServer) {
+        // Server rejected (e.g. already claimed) — do NOT credit locally.
+        SnackBarHelper.showError(
+          context,
+          res.duplicated ? l.t('already_claimed') : (res.error ?? l.t('claim_failed')),
+        );
+        return;
+      }
+    }
+
+    // ---- Local demo fallback (Functions unreachable / offline) ----
     context.read<PointsRepository>().credit(
       points: ms.points,
       title: '${m.game} · ${ms.label}',

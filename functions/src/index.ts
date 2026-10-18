@@ -264,10 +264,32 @@ const SERVER_PRICE_TABLE: Record<string, { points: number; title: string }> = {
   "2004": { points: 400, title: "Start a free trial" },
   "2005": { points: 60, title: "Sign up for a newsletter" },
   "2006": { points: 95, title: "Watch a product demo" },
+
+  // Game mission TOTALS (kept for reference / whole-mission claims).
   game_coin_master: { points: 3600, title: "Coin Master · all milestones" },
   game_dice_dreams: { points: 1950, title: "Dice Dreams · all milestones" },
   game_puzzle: { points: 4350, title: "Royal Match · all milestones" },
   game_merge: { points: 1520, title: "Merge Mansion · all milestones" },
+
+  // ---------------------------------------------------------------------
+  // Per-milestone prices. The client sends `<missionId>#<milestoneIndex>`
+  // and the SERVER decides the amount — the app never names a number.
+  // Each id is also the idempotency key, so a milestone can only be
+  // claimed once per user.
+  // ---------------------------------------------------------------------
+  "game_coin_master#0": { points: 300, title: "Coin Master · Reach level 5" },
+  "game_coin_master#1": { points: 900, title: "Coin Master · Reach level 15" },
+  "game_coin_master#2": { points: 2400, title: "Coin Master · Reach level 30" },
+
+  "game_dice_dreams#0": { points: 450, title: "Dice Dreams · Reach level 8" },
+  "game_dice_dreams#1": { points: 1500, title: "Dice Dreams · Reach level 20" },
+
+  "game_puzzle#0": { points: 250, title: "Royal Match · Complete level 10" },
+  "game_puzzle#1": { points: 1100, title: "Royal Match · Complete level 50" },
+  "game_puzzle#2": { points: 3000, title: "Royal Match · Complete level 120" },
+
+  "game_merge#0": { points: 320, title: "Merge Mansion · Reach level 6" },
+  "game_merge#1": { points: 1200, title: "Merge Mansion · Reach level 18" },
 };
 
 /**
