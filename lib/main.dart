@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import 'screens/home_screen.dart';
+import 'screens/main_shell.dart';
 import 'services/ads_init.dart';
 import 'services/points_repository.dart';
 import 'theme/app_theme.dart';
@@ -9,7 +9,7 @@ import 'theme/app_theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Load the persisted points balance before the first frame.
+  // Load the persisted points balance + history before the first frame.
   await PointsRepository.instance.load();
 
   // Initialize the Google Mobile Ads SDK (no-op on Flutter Web).
@@ -18,7 +18,9 @@ Future<void> main() async {
   runApp(const RewardsHubApp());
 }
 
-/// Rewards Hub — hybrid monetization home screen (AdMob banner + WebView offerwall).
+/// Rewards Hub — a Freecash-style rewards app (AdMob banner + WebView offerwall).
+///
+/// One Flutter codebase for Android + iOS (with a Flutter Web preview).
 class RewardsHubApp extends StatelessWidget {
   const RewardsHubApp({super.key});
 
@@ -32,7 +34,7 @@ class RewardsHubApp extends StatelessWidget {
         theme: AppTheme.light(),
         darkTheme: AppTheme.dark(),
         themeMode: ThemeMode.system,
-        home: const HomeScreen(),
+        home: const MainShell(),
       ),
     );
   }
