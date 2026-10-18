@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/offer.dart';
+import 'sync_service.dart';
 
 /// Home for the user's reward balance and history.
 ///
@@ -11,6 +12,7 @@ import '../models/offer.dart';
 ///  - persist the balance AND the transaction history (`shared_preferences`)
 ///  - expose a USD cash value (`PointsMath`, 1,000 pts = $1)
 ///  - seed a starter balance so the demo feels alive
+///  - **sync across devices** through Cloud Firestore (see [SyncService])
 class PointsRepository extends ChangeNotifier {
   PointsRepository._();
 
@@ -31,6 +33,13 @@ class PointsRepository extends ChangeNotifier {
   List<RewardTransaction> get transactions => List.unmodifiable(_transactions);
 
   SharedPreferences? _prefs;
+
+  /// The signed-in user id whose cloud document mirrors this state (null when
+  /// signed out / guest). Set via [bindUser].
+  String? _uid;
+
+  /// Live sync state for the UI.
+  SyncStatus get syncStatus => SyncService.instance.status.value;
 
   /// Loads the persisted balance + history. Call once during app startup.
   Future<void> load() async {
@@ -64,6 +73,40 @@ class PointsRepository extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---------------------------------------------------------------------------
+  // Cloud sync
+  // ---------------------------------------------------------------------------
+
+  /// Attaches (or detaches, with `null`) the signed-in user and syncs.
+  ///
+  /// On sign-in the cloud document is fetched and merged: the **cloud is the
+  /// source of truth** when it already has data, otherwise the local state is
+  /// pushed up (first-device case).
+  Future<void> bindUser(String? uid) async {
+    _uid = uid;
+    if (uid == null) {
+      SyncService.instance.reset();
+      notifyListeners();
+      return;
+    }
+
+    final CloudSnapshot? cloud = await SyncService.instance.pull(uid);
+    if (cloud != null && (cloud.transactions.isNotEmpty || cloud.points > 0)) {
+      // Cloud wins — adopt its balance + history.
+      _points = cloud.points;
+      _transactions
+        ..clear()
+        ..addAll(
+          cloud.transactions..sort((a, b) => b.timestamp.compareTo(a.timestamp)),
+        );
+      await _persist();
+      notifyListeners();
+    } else {
+      // No cloud data yet — seed the cloud from this device.
+      await _pushToCloud();
+    }
+  }
+
   /// Adds (or subtracts, with a negative delta) points and returns the new balance.
   int addPoints(int delta, {String? offerTitle, String? offerId}) {
     _points = (_points + delta).clamp(0, 1 << 31);
@@ -80,6 +123,7 @@ class PointsRepository extends ChangeNotifier {
     }
     _persistSoon();
     notifyListeners();
+    _pushSoon();
     return _points;
   }
 
@@ -104,6 +148,7 @@ class PointsRepository extends ChangeNotifier {
     );
     _persistSoon();
     notifyListeners();
+    _pushSoon();
     return _points;
   }
 
@@ -112,7 +157,33 @@ class PointsRepository extends ChangeNotifier {
     _points = 0;
     _transactions.clear();
     await _persist();
+    if (_uid != null) {
+      await SyncService.instance.clear(_uid!);
+    }
     notifyListeners();
+  }
+
+  /// Manually forces a cloud push (used by the Profile "Sync now" action).
+  Future<void> syncNow() async {
+    if (_uid == null) return;
+    await _pushToCloud();
+  }
+
+  Future<void> _pushToCloud() async {
+    final String? uid = _uid;
+    if (uid == null) return;
+    await SyncService.instance.push(
+      uid: uid,
+      points: _points,
+      transactions: _transactions,
+    );
+    notifyListeners();
+  }
+
+  void _pushSoon() {
+    if (_uid == null) return;
+    // Fire-and-forget: never blocks the UI on the network.
+    _pushToCloud().ignore();
   }
 
   List<RewardTransaction> _decodeTransactions(String? raw) {

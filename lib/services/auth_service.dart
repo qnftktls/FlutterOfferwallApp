@@ -1,6 +1,8 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
+import 'points_repository.dart';
+
 /// Result of an auth operation, surfaced to the UI.
 class AuthResult {
   const AuthResult({required this.ok, this.error});
@@ -46,6 +48,8 @@ class AuthService {
       user.value = u == null
           ? null
           : AppUser(uid: u.uid, email: u.email ?? '', isGuest: false);
+      // Attach / detach the cloud sync target whenever the account changes.
+      PointsRepository.instance.bindUser(u?.uid).ignore();
     });
   }
 
@@ -117,10 +121,13 @@ class AuthService {
   /// Continue without an account.
   void continueAsGuest() {
     user.value = const AppUser(uid: 'guest', email: '', isGuest: true);
+    // Guests are local-only: detach cloud sync.
+    PointsRepository.instance.bindUser(null).ignore();
   }
 
   Future<void> signOut() async {
     user.value = null;
+    PointsRepository.instance.bindUser(null).ignore();
     try {
       await _auth?.signOut();
     } catch (_) {

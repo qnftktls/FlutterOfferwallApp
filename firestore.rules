@@ -1,0 +1,34 @@
+rules_version = '2';
+
+// Rewards Hub — Cloud Firestore security rules
+//
+// Data model (no subcollections, no composite indexes needed):
+//   users/{uid}  {  points: int,  tx: [ {title, points, timestamp, offerId} ],  updatedAt: timestamp }
+//
+// Each user can only read/write their OWN document. The uid comes from the
+// verified Firebase Auth token, so `request.auth.uid` cannot be spoofed.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{uid} {
+      // Only the authenticated owner may read or write their document.
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+
+      // Guard rails: points must be a non-negative int and the history an array,
+      // so a tampered client cannot store garbage. (Real anti-fraud MUST be
+      // server-side — never trust a client-computed balance for real payouts.)
+      allow create, update: if request.auth != null
+                            && request.auth.uid == uid
+                            && request.resource.data.points is int
+                            && request.resource.data.points >= 0
+                            && request.resource.data.tx is list
+                            && request.resource.data.tx.size() <= 200;
+    }
+
+    // Everything else is denied by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

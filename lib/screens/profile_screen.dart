@@ -6,6 +6,7 @@ import '../models/offer.dart';
 import '../services/auth_service.dart';
 import '../services/points_repository.dart';
 import '../services/settings_repository.dart';
+import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offer_card.dart';
 import 'auth_screen.dart';
@@ -126,6 +127,10 @@ class ProfileScreen extends StatelessWidget {
           ),
         const SizedBox(height: AppSpacing.md),
 
+        // Cloud sync status card
+        _syncCard(context, user, repo),
+        const SizedBox(height: AppSpacing.md),
+
         // Stats
         Row(
           children: <Widget>[
@@ -204,6 +209,93 @@ class ProfileScreen extends StatelessWidget {
           onTap: () => _confirmReset(context, repo),
         ),
       ],
+    );
+  }
+
+  /// A card that reflects the live Cloud Firestore sync state.
+  Widget _syncCard(
+    BuildContext context,
+    AppUser? user,
+    PointsRepository repo,
+  ) {
+    final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
+    final bool signedIn = user != null && !user.isGuest;
+
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: theme.cardTheme.color,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: theme.dividerColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Icon(Icons.cloud_sync_rounded,
+                  size: 20, color: AppColors.brandAccent),
+              const SizedBox(width: 8),
+              Text(l.t('sync'), style: theme.textTheme.titleMedium),
+              const Spacer(),
+              if (signedIn)
+                TextButton(
+                  onPressed: repo.syncStatus == SyncStatus.syncing
+                      ? null
+                      : () => repo.syncNow(),
+                  child: Text(l.t('sync_now')),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          // Live status line driven by SyncService.status.
+          ValueListenableBuilder<SyncStatus>(
+            valueListenable: SyncService.instance.status,
+            builder: (BuildContext context, SyncStatus s, _) {
+              final (IconData icon, Color color, String label) = switch (s) {
+                SyncStatus.synced => (
+                    Icons.check_circle_rounded,
+                    AppColors.brandAccent,
+                    l.t('sync_synced'),
+                  ),
+                SyncStatus.syncing => (
+                    Icons.sync_rounded,
+                    Colors.orangeAccent,
+                    l.t('sync_syncing'),
+                  ),
+                SyncStatus.error => (
+                    Icons.error_outline_rounded,
+                    Colors.redAccent,
+                    l.t('sync_error'),
+                  ),
+                SyncStatus.offline => (
+                    Icons.cloud_off_rounded,
+                    AppTheme.muted(context),
+                    l.t('sync_offline'),
+                  ),
+              };
+              return Row(
+                children: <Widget>[
+                  Icon(icon, size: 16, color: color),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: theme.textTheme.bodySmall?.copyWith(color: color),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 6),
+          Text(
+            signedIn ? l.t('sync_detail') : l.t('guest_no_sync'),
+            style: theme.textTheme.bodySmall,
+          ),
+        ],
+      ),
     );
   }
 
