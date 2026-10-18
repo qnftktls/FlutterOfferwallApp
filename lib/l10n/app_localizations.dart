@@ -155,6 +155,10 @@ class AppLocalizations {
     'sync_detail':
         'Your balance and reward history are stored on this device and mirrored to the cloud when you sign in.',
     'guest_no_sync': 'Guest data stays on this device.',
+    'already_claimed': 'This offer was already credited.',
+    'claim_failed': 'Could not claim the reward. Please try again.',
+    'cashout_failed': 'Cashout failed. Please try again.',
+    'server_verified': 'Server-verified',
 
     'sign_in_title': 'Welcome back',
     'sign_in_sub': 'Sign in to keep your rewards safe',
@@ -274,6 +278,10 @@ class AppLocalizations {
     'sync_detail':
         '잔액과 리워드 내역은 이 기기에 저장되며, 로그인하면 클라우드에 미러링됩니다.',
     'guest_no_sync': '게스트 데이터는 이 기기에만 저장됩니다.',
+    'already_claimed': '이미 적립된 오퍼입니다.',
+    'claim_failed': '보상을 받을 수 없습니다. 다시 시도하세요.',
+    'cashout_failed': '출금에 실패했습니다. 다시 시도하세요.',
+    'server_verified': '서버 검증됨',
 
     'sign_in_title': '다시 오신 것을 환영합니다',
     'sign_in_sub': '로그인하고 리워드를 안전하게 보관하세요',

@@ -111,9 +111,31 @@ class PayoutConfig {
 
   /// Base URL of your backend that fulfills payouts. In production the app POSTs
   /// a withdrawal request here and the server talks to the payout provider.
+  /// Leave blank to use the `requestPayout` Cloud Function instead.
   static const String backendBaseUrl = '';
 
   /// When true, cashout is simulated locally (demo). Set false once
   /// [backendBaseUrl] is wired to a real service.
   static const bool demoMode = true;
+}
+
+/// Anti-fraud / server-verification configuration.
+class SecurityConfig {
+  SecurityConfig._();
+
+  /// When `true`, rewards and payouts go through Cloud Functions
+  /// (`claimOffer` / `requestPayout`) so the **server** is the source of truth.
+  ///
+  /// Requires the `functions/` folder to be deployed (Blaze plan). If the
+  /// callables are unreachable the app falls back to the local demo path and
+  /// shows the sync state as "offline", so nothing crashes.
+  ///
+  /// ⚠️ Set this to `true` for any build where real money is involved.
+  static const bool useServerVerification = true;
+
+  /// Firestore collection holding payout requests (written by the server).
+  static const String payoutsCollection = 'payouts';
+
+  /// Name of the offerwall postback secret (server-side only — never in the app).
+  static const String offerwallSecretName = 'OFFERWALL_SECRET';
 }

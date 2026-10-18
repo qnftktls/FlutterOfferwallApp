@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../config/app_config.dart';
 import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
 import '../services/interstitial.dart';
 import '../services/points_repository.dart';
+import '../services/reward_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/banner_ad.dart';
 import '../widgets/offer_card.dart';
@@ -23,6 +25,7 @@ class OfferDetailScreen extends StatefulWidget {
 
 class _OfferDetailScreenState extends State<OfferDetailScreen> {
   bool _completed = false;
+  bool _busy = false;
 
   @override
   void initState() {
@@ -36,10 +39,51 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
     });
   }
 
-  void _completeOffer() {
-    if (_completed) return;
+  /// Completes the offer.
+  ///
+  /// ## Anti-fraud
+  /// When [SecurityConfig.useServerVerification] is on, the reward is credited
+  /// by the **server** (`claimOffer` Cloud Function), which looks up the
+  /// authoritative amount itself — the client only sends the offer id. If the
+  /// backend is unreachable the app falls back to the local demo credit so the
+  /// UX never breaks (and the Profile sync card shows "offline").
+  Future<void> _completeOffer() async {
+    if (_completed || _busy) return;
     final AppLocalizations l = context.l10n;
     final PointsRepository repo = context.read<PointsRepository>();
+
+    // ---- Server-verified path (production / anti-fraud) ----
+    if (SecurityConfig.useServerVerification && RewardService.instance.isAvailable) {
+      setState(() => _busy = true);
+      final ClaimResult res = await RewardService.instance.claimOffer(
+        offerId: widget.offer.id,
+      );
+      if (!mounted) return;
+      setState(() => _busy = false);
+
+      if (res.ok) {
+        setState(() => _completed = true);
+        SnackBarHelper.showReward(
+          context,
+          l.f('earned_points', <String, Object?>{
+            'pts': PointsMath.formatPoints(widget.offer.reward),
+          }),
+        );
+        return;
+      }
+
+      // Server reachable but rejected (unknown offer / already claimed) — do
+      // NOT credit locally, that would defeat the whole point.
+      if (res.fromServer) {
+        SnackBarHelper.showError(
+          context,
+          res.duplicated ? l.t('already_claimed') : (res.error ?? l.t('claim_failed')),
+        );
+        return;
+      }
+    }
+
+    // ---- Local demo fallback (Functions not deployed / offline) ----
     repo.addPoints(
       widget.offer.reward,
       offerTitle: widget.offer.title,
@@ -124,7 +168,7 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
                   child: SizedBox(
                     width: double.infinity,
                     child: FilledButton(
-                      onPressed: _completed ? null : _completeOffer,
+                      onPressed: (_completed || _busy) ? null : _completeOffer,
                       style: FilledButton.styleFrom(
                         minimumSize: const Size(0, 52),
                         backgroundColor: _completed
@@ -132,17 +176,27 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
                             : AppColors.brandAccent,
                         foregroundColor: const Color(0xFF04121F),
                       ),
-                      child: Text(
-                        _completed
-                            ? l.t('completed')
-                            : l.f('start_offer', <String, Object?>{
-                                'pts': PointsMath.formatPoints(offer.reward),
-                              }),
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 15,
-                        ),
-                      ),
+                      child: _busy
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Color(0xFF04121F),
+                              ),
+                            )
+                          : Text(
+                              _completed
+                                  ? l.t('completed')
+                                  : l.f('start_offer', <String, Object?>{
+                                      'pts':
+                                          PointsMath.formatPoints(offer.reward),
+                                    }),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 15,
+                              ),
+                            ),
                     ),
                   ),
                 ),

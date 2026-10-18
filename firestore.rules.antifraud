@@ -1,0 +1,53 @@
+rules_version = '2';
+
+// Rewards Hub — Cloud Firestore security rules (ANTI-FRAUD / production)
+// ============================================================================
+// Deploy this AFTER the Cloud Functions are live.
+//
+// Difference from firestore.rules (dev):
+//   * `points` and `tx` become SERVER-ONLY. The client may read its document
+//     but can NEVER write the balance — only Cloud Functions (Admin SDK, which
+//     bypasses these rules) can credit or debit points.
+//   * The client may still write *harmless* profile fields (device, locale…).
+//
+// This is what makes a client-side balance tamper-proof: patching the APK and
+// POSTing your own points simply fails, because the write is denied.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{uid} {
+      // Read your own document (balance + history) — that's all the app needs.
+      allow read: if request.auth != null && request.auth.uid == uid;
+
+      // First write may create a document, but NEVER with points/tx set by the
+      // client: they must be absent or match the safe defaults.
+      allow create: if request.auth != null
+                    && request.auth.uid == uid
+                    && !("points" in request.resource.data)
+                    && !("tx" in request.resource.data);
+
+      // Updates: the balance fields must be unchanged. Only non-sensitive
+      // profile metadata may be written from the client.
+      allow update: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.points == resource.data.points
+                    && request.resource.data.tx == resource.data.tx;
+
+      // The client may not delete its document (history is audit data).
+      allow delete: if false;
+    }
+
+    // Payout requests are written by the `requestPayout` Cloud Function only.
+    // The client may read its own requests to show status.
+    match /payouts/{payoutId} {
+      allow read: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow write: if false; // server-only
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

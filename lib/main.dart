@@ -10,6 +10,7 @@ import 'screens/main_shell.dart';
 import 'services/ads_init.dart';
 import 'services/auth_service.dart';
 import 'services/points_repository.dart';
+import 'services/reward_service.dart';
 import 'services/settings_repository.dart';
 import 'services/sync_service.dart';
 import 'theme/app_theme.dart';
@@ -17,18 +18,20 @@ import 'theme/app_theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Firebase (Auth + Firestore). Degrades gracefully if initialization fails.
+  // Firebase (Auth + Firestore + Functions). Degrades gracefully if it fails.
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
     AuthService.instance.markReady(true);
     SyncService.instance.markReady(true);
+    RewardService.instance.markReady(true);
     AuthService.instance.bind();
   } catch (e) {
     if (kDebugMode) debugPrint('Firebase init failed (continuing offline): $e');
     AuthService.instance.markReady(false);
     SyncService.instance.markReady(false);
+    RewardService.instance.markReady(false);
   }
 
   // Load persisted state before the first frame.

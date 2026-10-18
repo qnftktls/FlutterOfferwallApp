@@ -48,3 +48,9 @@ app.*.map.json
 android/key.properties
 android/*.jks
 *.keystore
+
+# Cloud Functions (Node) — never commit dependencies or build output
+functions/node_modules/
+functions/lib/
+functions/*.log
+functions/.env

@@ -169,6 +169,34 @@ class PointsRepository extends ChangeNotifier {
     await _pushToCloud();
   }
 
+  /// Adopts the balance the **server** reports as authoritative.
+  ///
+  /// Used after a server-verified claim or payout: the Cloud Function already
+  /// computed the new balance, so we trust it over our local arithmetic. The
+  /// local transaction list is refreshed with a pull instead of being mutated,
+  /// because the server owns the history.
+  Future<void> adoptServerBalance(int serverBalance) async {
+    _points = serverBalance.clamp(0, 1 << 31);
+    await _persist();
+    notifyListeners();
+
+    // Re-pull the authoritative history so the UI matches the server.
+    final String? uid = _uid;
+    if (uid != null) {
+      final CloudSnapshot? cloud = await SyncService.instance.pull(uid);
+      if (cloud != null && cloud.transactions.isNotEmpty) {
+        _transactions
+          ..clear()
+          ..addAll(
+            cloud.transactions
+              ..sort((a, b) => b.timestamp.compareTo(a.timestamp)),
+          );
+        await _persist();
+        notifyListeners();
+      }
+    }
+  }
+
   Future<void> _pushToCloud() async {
     final String? uid = _uid;
     if (uid == null) return;

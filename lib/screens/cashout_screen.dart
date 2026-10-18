@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../config/app_config.dart';
 import '../data/sample_data.dart';
 import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
 import '../services/auth_service.dart';
 import '../services/payout_service.dart';
 import '../services/points_repository.dart';
+import '../services/reward_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offer_card.dart';
 import 'earn_screen.dart' show SnackBarHelper;
@@ -222,6 +224,34 @@ class _ConfirmSheetState extends State<_ConfirmSheet> {
         AuthService.instance.user.value?.uid ?? 'guest';
 
     setState(() => _busy = true);
+
+    // ---- Server-authoritative path (anti-fraud) ----
+    // The server validates the balance, debits it atomically and records the
+    // payout request. The client never decides the amount that is paid out.
+    if (SecurityConfig.useServerVerification &&
+        RewardService.instance.isAvailable) {
+      final PayoutCallResult res = await RewardService.instance.requestPayout(
+        method: widget.option.id,
+        points: widget.points,
+      );
+      if (!mounted) return;
+      setState(() => _busy = false);
+
+      if (res.ok) {
+        await repo.syncNow(); // re-pull the server-owned history
+        if (!mounted) return;
+        Navigator.pop(context);
+        SnackBarHelper.showReward(
+          context,
+          res.message ?? l.t('cashout_submitted'),
+        );
+      } else {
+        SnackBarHelper.showError(context, res.error ?? l.t('cashout_failed'));
+      }
+      return;
+    }
+
+    // ---- Local demo / backend-webhook fallback ----
     final PayoutResult res = await PayoutService.instance.requestCashout(
       option: widget.option,
       points: widget.points,
@@ -231,7 +261,6 @@ class _ConfirmSheetState extends State<_ConfirmSheet> {
     setState(() => _busy = false);
 
     if (res.ok) {
-      // Real payout: deduct the points and record the withdrawal.
       repo.spend(
         widget.points,
         title: l.f('cashout_via', <String, Object?>{
