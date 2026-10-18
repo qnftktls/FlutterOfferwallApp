@@ -26,6 +26,34 @@ $Project = 'flutter-offerwall-app'
 $Root    = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $Root
 
+# ---------------------------------------------------------------------------
+# SUPERSEDED - use deploy.ps1 instead.
+#
+# This script's deploy step piped through `Select-Object -Last 30`, which
+# buffers EVERYTHING until the process exits. Combined with the firebase CLI
+# stopping on "Would you like to enable the required APIs? (Y/n)" - a prompt
+# that `--force` does NOT bypass - the result was a 20 minute silent hang.
+#
+# deploy.ps1 fixes all of it: --non-interactive, live byte-offset tailing,
+# prompt detection, and a process-tree kill. Use that one.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Yellow
+Write-Host "  NOTE: deploy_all.ps1 is superseded by deploy.ps1" -ForegroundColor Yellow
+Write-Host "============================================================" -ForegroundColor Yellow
+Write-Host "  This script can hang silently on the API-enablement prompt." -ForegroundColor Yellow
+Write-Host "  deploy.ps1 streams live output and auto-kills a stuck prompt." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Recommended:" -ForegroundColor Gray
+Write-Host "    powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -TimeoutSeconds 1200" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  Running deploy.ps1 for you now (5 second escape window)." -ForegroundColor Gray
+Write-Host ""
+Start-Sleep -Seconds 5
+
+& (Join-Path $Root 'deploy.ps1') @PSBoundParameters
+exit $LASTEXITCODE
+
 function HR   { Write-Host ("-" * 62) }
 function Ok   { param([string]$m) Write-Host "  [OK] $m" -ForegroundColor Green }
 function Bad  { param([string]$m) Write-Host "  [X]  $m" -ForegroundColor Red }

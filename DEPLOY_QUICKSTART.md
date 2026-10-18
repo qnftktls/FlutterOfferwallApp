@@ -5,12 +5,44 @@
 
 ---
 
+## ⚠️ 먼저 읽어주세요 — 실제로 막혔던 두 가지
+
+**1) `deploy_all.ps1` 은 폐기되었습니다. `deploy.ps1` 을 쓰세요.**
+
+`deploy_all.ps1` 의 배포 단계는 `Select-Object -Last 30` 으로 출력을 파이프했습니다.
+이 명령은 프로세스가 **끝날 때까지 전체 출력을 버퍼링**하므로 배포 중 화면이 비어 있습니다.
+
+그리고 `--force` 는 **함수 삭제** 프롬프트만 우회합니다.
+Blaze 업그레이드 후 첫 배포에서는 CLI 가 이걸 물어봅니다:
+
+```
+? Would you like to enable the required APIs? (Y/n)
+```
+
+`--force` 는 이걸 막지 못합니다 → **키 입력을 기다리며 20분 멈춤** → 화면은 계속 비어 있음.
+
+`deploy.ps1` 은 `--non-interactive`, 실시간 출력, 프롬프트 감지, 프로세스 트리 종료로
+이 문제를 전부 해결합니다. **`deploy_all.ps1` 을 실행하면 자동으로 `deploy.ps1` 로 넘어갑니다.**
+
+**2) 🔴 Firebase Authentication 이 꺼져 있습니다 (더 급한 문제)**
+
+실측 결과 `CONFIGURATION_NOT_FOUND` 입니다. `claimOffer`/`requestPayout` 는 로그인이
+필수이므로, **지금은 서버 보상이 아무에게도 지급되지 않습니다.**
+
+👉 https://console.firebase.google.com/project/flutter-offerwall-app/authentication
+→ 시작하기 → Sign-in method → **이메일/비밀번호 사용 설정**
+
+자세한 내용은 **`CRITICAL_PATHS.md`** 를 보세요.
+
+---
+
 ## ⚡ 초간단 (복사-붙여넣기)
 
 ### 0단계 — 준비 (최초 1회만)
 
-```bash
+```powershell
 # Node.js 20+ 필요 → https://nodejs.org
+
 # Firebase CLI 설치
 npm install -g firebase-tools
 
@@ -24,25 +56,28 @@ cd FlutterOfferwallApp
 
 ### 1단계 — 원샷 배포
 
-```bash
-bash deploy_all.sh
+```powershell
+# 첫 실행은 API 활성화에 5~10분 걸릴 수 있어 타임아웃을 넉넉히
+powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -TimeoutSeconds 1200
 ```
 
 **끝입니다.** 스크립트가 아래를 자동으로 처리합니다:
 
 | 단계 | 내용 |
 |---|---|
-| 0 | 도구 확인 (firebase, node) |
+| 0 | 도구 확인 (node, npm, firebase) |
 | 1 | 로그인 확인 |
-| 2 | 프로젝트 접근 확인 |
-| 3 | `npm install` |
-| 4 | TypeScript 빌드 |
-| 5 | `OFFERWALL_SECRET` 시크릿 자동 생성 |
-| 6 | **함수 3개 배포** |
-| 7 | 안티프라우드 Firestore 규칙 적용 |
-| 8 | 배포 결과 확인 |
+| 2 | `npm install` + TypeScript 빌드 |
+| 3 | **함수 배포** (실시간 출력 + 프롬프트 자동 차단) |
+| 4 | 엔드포인트 3개 응답 확인 |
+| 5 | 안티프라우드 규칙 — **기본은 건너뜀** (`-ApplyRules` 로 옵트인) |
 
-> ⏱ 소요: 약 3~5분 (첫 배포는 API 활성화 포함 최대 8분)
+> ⏱ 소요: 약 3~5분 (첫 배포는 API 활성화 포함 최대 10분)
+> 🔒 규칙 적용은 기본 OFF 입니다. 모든 크레딧 경로가 서버 기반이 된 뒤에 `-ApplyRules` 를 쓰세요.
+
+> ⚠️ **WSL(`bash`) 을 쓰지 마세요.** `bash deploy_all.sh` 는 PowerShell 에서 WSL 을 부르는데,
+> 님 PC 는 WSL 이 손상되어(`ext4.vhdx` ERROR_FILE_NOT_FOUND) 실패합니다.
+> 위의 PowerShell 명령을 쓰세요. (`WINDOWS_DEPLOY.md` 참고)
 
 ---
 
