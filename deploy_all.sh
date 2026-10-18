@@ -1,138 +1,148 @@
 #!/usr/bin/env bash
 # =============================================================
-#  Rewards Hub — Cloud Functions 원샷 배포 스크립트
+#  Rewards Hub — Cloud Functions 원샷 배포 스크립트 (사용자 PC용)
 #  사용법: bash deploy_all.sh
-#  전제 : Firebase 콘솔에서 API 5개 활성화 완료
+#
+#  전제: firebase login 완료 (본인 Google 계정)
+#        Cloud Functions API 활성 프롬프트에서 "사용 설정" 클릭
 # =============================================================
 set -uo pipefail
 
 PROJECT="flutter-offerwall-app"
-SA="/opt/flutter/firebase-admin-sdk.json"
-ROOT="/home/user/flutter_app"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-export GOOGLE_APPLICATION_CREDENTIALS="$SA"
+# 색상
+G='\033[0;32m'; R='\033[0;31m'; Y='\033[0;33m'; B='\033[1;34m'; N='\033[0m'
+hr()  { printf '%s\n' "------------------------------------------------------------"; }
+ok()  { printf "  ${G}✅ %s${N}\n" "$1"; }
+bad() { printf "  ${R}❌ %s${N}\n" "$1"; }
+warn(){ printf "  ${Y}⚠️  %s${N}\n" "$1"; }
+info(){ printf "  · %s\n" "$1"; }
+step(){ printf "\n${B}%s${N}\n" "$1"; hr; }
+
 cd "$ROOT"
 
-hr() { printf '%s\n' "------------------------------------------------------------"; }
-ok() { printf '  ✅ %s\n' "$1"; }
-bad() { printf '  ❌ %s\n' "$1"; }
-info() { printf '  · %s\n' "$1"; }
-
-echo "============================================================"
-echo " ① 선행 점검 — 필수 API 활성 상태"
-echo "============================================================"
-
-python3 - <<'PYEOF'
-import json, time, urllib.request, urllib.parse, urllib.error, jwt, sys
-PROJECT = "flutter-offerwall-app"
-sa = json.load(open("/opt/flutter/firebase-admin-sdk.json"))
-now = int(time.time())
-p = {"iss": sa["client_email"], "scope": "https://www.googleapis.com/auth/cloud-platform",
-     "aud": "https://oauth2.googleapis.com/token", "iat": now, "exp": now+3600}
-signed = jwt.encode(p, sa["private_key"], algorithm="RS256")
-body = urllib.parse.urlencode({"grant_type":"urn:ietf:params:oauth:grant-type:jwt-bearer","assertion":signed}).encode()
-tok = json.loads(urllib.request.urlopen(urllib.request.Request("https://oauth2.googleapis.com/token", data=body)).read())["access_token"]
-
-eps = {
- "cloudfunctions": f"https://cloudfunctions.googleapis.com/v2/projects/{PROJECT}/locations/-/functions",
- "cloudbuild": f"https://cloudbuild.googleapis.com/v1/projects/{PROJECT}/builds?pageSize=1",
- "artifactregistry": f"https://artifactregistry.googleapis.com/v1/projects/{PROJECT}/locations/-/repositories",
- "run": f"https://run.googleapis.com/v2/projects/{PROJECT}/locations/-/services",
- "eventarc": f"https://eventarc.googleapis.com/v1/projects/{PROJECT}/locations/-/triggers",
-}
-missing = []
-for name, url in eps.items():
-    try:
-        r = urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"}))
-        print(f"  ✅ {name}: 활성 (HTTP {r.status})")
-    except urllib.error.HTTPError as e:
-        b = e.read().decode()
-        try: m = json.loads(b)["error"]["message"]
-        except Exception: m = b
-        if "has not been used" in m or "is disabled" in m:
-            print(f"  ❌ {name}: 비활성")
-            missing.append(name)
-        else:
-            print(f"  ⚠️  {name}: {m[:80]}")
-            missing.append(name)
-if missing:
-    print()
-    print("  ============================================")
-    print("  ⛔ 배포 중단 — 다음 API를 먼저 활성화하세요:")
-    for m in missing: print(f"     - {m}")
-    print("  ============================================")
-    print("  콘솔(가장 빠름):")
-    print(f"     https://console.firebase.google.com/project/{PROJECT}/functions")
-    print("     → '함수 만들기' / '시작하기' 클릭 → API 사용 설정")
-    sys.exit(2)
-print()
-print("  ✅ 필수 API 전부 활성 상태 — 배포 진행 가능")
-PYEOF
-
-APICHK=$?
-if [ "$APICHK" -ne 0 ]; then
-  echo ""
-  bad "API가 아직 비활성입니다. 콘솔에서 활성화 후 다시 실행하세요."
+step "STEP 0 — 도구 확인"
+if command -v firebase >/dev/null 2>&1; then
+  ok "firebase CLI: $(firebase --version)"
+else
+  bad "firebase CLI 없음"
+  info "설치: npm install -g firebase-tools"
   exit 1
 fi
 
-hr
-echo "② Functions 의존성 설치"
-hr
-cd "$ROOT/functions"
-npm install --silent 2>&1 | tail -3
-ok "npm install 완료"
-
-hr
-echo "③ TypeScript 빌드"
-hr
-npm run build 2>&1 | tail -5
-if [ -f "$ROOT/functions/lib/index.js" ]; then ok "컴파일 성공"; else bad "컴파일 실패"; exit 1; fi
-
-hr
-echo "④ 시크릿 등록 (OFFERWALL_SECRET)"
-hr
-cd "$ROOT"
-if firebase functions:secrets:access OFFERWALL_SECRET --project "$PROJECT" >/dev/null 2>&1; then
-  ok "시크릿 이미 존재 (건너뜀)"
-else
-  SECRET_VAL="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  if printf '%s' "$SECRET_VAL" | firebase functions:secrets:set OFFERWALL_SECRET --project "$PROJECT" --data-file=- >/dev/null 2>&1; then
-    ok "시크릿 생성 완료 (32바이트 랜덤)"
+if command -v node >/dev/null 2>&1; then
+  NODE_MAJOR=$(node -v | sed 's/v//' | cut -d. -f1)
+  if [ "$NODE_MAJOR" -ge 20 ]; then
+    ok "node $(node -v) (요구: 20+)"
   else
-    info "자동 등록 실패 — 아래 값으로 수동 등록하세요:"
+    warn "node $(node -v) — 20 이상 권장"
+  fi
+else
+  bad "node 없음 — https://nodejs.org 에서 설치"
+  exit 1
+fi
+
+step "STEP 1 — Firebase 로그인 확인"
+WHO=$(firebase login:list 2>/dev/null | sed -n '2p')
+if [ -z "$WHO" ]; then
+  bad "로그인 안 됨"
+  info "실행: firebase login"
+  info "(브라우저가 열리고 본인 Google 계정으로 로그인)"
+  exit 1
+fi
+ok "로그인: $(echo "$WHO" | sed 's/^ *//')"
+
+step "STEP 2 — 프로젝트 확인"
+if firebase projects:list --non-interactive 2>/dev/null | grep -q "$PROJECT"; then
+  ok "프로젝트 접근 가능: $PROJECT"
+else
+  bad "프로젝트 '$PROJECT' 접근 불가 — 계정 확인 필요"
+  exit 1
+fi
+
+step "STEP 3 — Functions 의존성 설치"
+cd "$ROOT/functions"
+if npm install --silent 2>&1 | tail -2; then
+  ok "npm install 완료"
+else
+  bad "npm install 실패"
+  exit 1
+fi
+
+step "STEP 4 — TypeScript 빌드"
+npm run build 2>&1 | tail -5
+if [ -f "$ROOT/functions/lib/index.js" ]; then
+  ok "컴파일 성공 (lib/index.js 생성)"
+else
+  bad "컴파일 실패"
+  exit 1
+fi
+
+cd "$ROOT"
+
+step "STEP 5 — 시크릿 등록 (OFFERWALL_SECRET)"
+if firebase functions:secrets:access OFFERWALL_SECRET --project "$PROJECT" >/dev/null 2>&1; then
+  ok "시크릿 이미 존재 — 건너뜀"
+else
+  info "광고주 postback 서명 검증용 시크릿을 등록합니다."
+  SECRET_VAL="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  if printf '%s' "$SECRET_VAL" | firebase functions:secrets:set OFFERWALL_SECRET \
+        --project "$PROJECT" --data-file=- >/dev/null 2>&1; then
+    ok "시크릿 생성 완료"
+  else
+    warn "자동 등록 실패 — 아래 값을 수동 등록하세요:"
     printf '     OFFERWALL_SECRET = %s\n' "$SECRET_VAL"
+    info "수동: firebase functions:secrets:set OFFERWALL_SECRET"
   fi
 fi
 
-hr
-echo "⑤ Cloud Functions 배포"
-hr
-firebase deploy --only functions --project "$PROJECT" --non-interactive 2>&1 | tail -25
+step "STEP 6 — Cloud Functions 배포 ($PROJECT)"
+info "처음이면 'API 사용 설정' 프롬프트가 뜹니다 → [사용 설정] 클릭"
+info "배포에는 3~5분 소요됩니다..."
+echo
+firebase deploy --only functions --project "$PROJECT" 2>&1 | tail -30
+DEPLOY_RC=${PIPESTATUS[0]}
 
-hr
-echo "⑥ Firestore 프로덕션 규칙 적용 (points/tx 서버 전용화)"
-hr
-if [ -f "$ROOT/firestore.rules.antifraud" ]; then
-  cp "$ROOT/firestore.rules" "$ROOT/firestore.rules.clientonly.bak"
-  cp "$ROOT/firestore.rules.antifraud" "$ROOT/firestore.rules"
-  firebase deploy --only firestore:rules,firestore:indexes --project "$PROJECT" --non-interactive 2>&1 | tail -12
-  ok "안티프라우드 규칙 배포 시도 완료"
+if [ "$DEPLOY_RC" -ne 0 ]; then
+  bad "함수 배포 실패 (위 로그 확인)"
+  info "팁: 'API has not been used' → 콘솔에서 사용 설정 후 재실행"
+  exit 1
+fi
+ok "함수 배포 완료"
+
+step "STEP 7 — Firestore 프로덕션 규칙 적용 (points/tx 서버 전용화)"
+RULES_FILE="$ROOT/firestore.rules"
+ANTI="$ROOT/firestore.rules.antifraud"
+if [ -f "$ANTI" ]; then
+  cp "$RULES_FILE" "$ROOT/firestore.rules.clientonly.bak"
+  cp "$ANTI" "$RULES_FILE"
+  if firebase deploy --only firestore:rules --project "$PROJECT" 2>&1 | tail -8; then
+    ok "안티프라우드 규칙 배포 완료"
+    info "백업: firestore.rules.clientonly.bak (클라이언트 쓰기 허용 버전)"
+  else
+    warn "규칙 배포 실패 — 클라이언트 버전으로 복원"
+    cp "$ROOT/firestore.rules.clientonly.bak" "$RULES_FILE"
+  fi
 else
   info "firestore.rules.antifraud 없음 — 건너뜀"
 fi
 
-hr
-echo "⑦ 배포 검증 — 엔드포인트 확인"
-hr
-for fn in offerwallPostback:onRequest claimOffer:onCall requestPayout:onCall; do
-  name="${fn%%:*}"
-  url="https://us-central1-$PROJECT.cloudfunctions.net/$name"
-  code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "$url" 2>/dev/null || echo "000")
-  info "$name → HTTP $code  ($url)"
+step "STEP 8 — 배포 결과 확인"
+firebase functions:list --project "$PROJECT" 2>&1 | tail -12
+echo
+info "함수 엔드포인트:"
+for fn in offerwallPostback claimOffer requestPayout; do
+  printf '     https://us-central1-%s.cloudfunctions.net/%s\n' "$PROJECT" "$fn"
 done
 
-echo ""
-echo "============================================================"
-ok "배포 파이프라인 종료"
-echo "============================================================"
+echo
+printf "${G}============================================================${N}\n"
+printf "${G}  배포 완료!${N}\n"
+printf "${G}============================================================${N}\n"
+echo
+echo "  다음 할 일:"
+echo "   1) 함수가 뜨는지 확인 (위 STEP 8 목록)"
+echo "   2) 광고주 대시보드에 postback URL 등록:"
+echo "      https://us-central1-$PROJECT.cloudfunctions.net/offerwallPostback"
+echo "   3) 앱에서 오퍼 완료 → 서버 검증 경로 동작 확인"
