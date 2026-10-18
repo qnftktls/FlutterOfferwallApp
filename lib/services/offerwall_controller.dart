@@ -11,7 +11,7 @@ import '../services/points_repository.dart';
 /// UI (toast text, last error).
 class OfferwallController extends ChangeNotifier {
   OfferwallController({PointsRepository? repository})
-    : _repository = repository ?? PointsRepository.instance;
+      : _repository = repository ?? PointsRepository.instance;
 
   final PointsRepository _repository;
 
@@ -39,6 +39,7 @@ class OfferwallController extends ChangeNotifier {
       final int newBalance = _repository.addPoints(
         message.reward,
         offerTitle: 'Offer ${message.offerId}',
+        offerId: message.offerId,
       );
       lastMessage = 'You earned ${message.reward} points!';
       lastError = null;
@@ -54,44 +55,32 @@ class OfferwallController extends ChangeNotifier {
     }
 
     if (message.isReady) {
-      if (kDebugMode) {
-        debugPrint('Offerwall ready');
-      }
+      if (kDebugMode) debugPrint('Offerwall ready');
       onPushBalance?.call(_repository.points);
       return true;
     }
 
     if (message.isError) {
       lastError = message.reason.isEmpty ? 'Offerwall error' : message.reason;
-      if (kDebugMode) {
-        debugPrint('Offerwall error: $lastError');
-      }
+      if (kDebugMode) debugPrint('Offerwall error: $lastError');
       notifyListeners();
       return true;
     }
 
-    if (kDebugMode) {
-      debugPrint('Unknown offerwall message: $raw');
-    }
+    if (kDebugMode) debugPrint('Unknown offerwall message: $raw');
     return false;
   }
 
   /// The URL to load: the provider's, or the bundled placeholder page.
-  String get resolvedUrl => OfferwallConfig.offerwallUrl.trim().isEmpty
-      ? 'assets/offerwall/offerwall_placeholder.html'
-      : OfferwallConfig.offerwallUrl;
+  String get resolvedUrl => OfferwallConfig.offerwallUrl;
 
-  bool get isPlaceholder => OfferwallConfig.offerwallUrl.trim().isEmpty;
+  bool get isPlaceholder => OfferwallConfig.isPlaceholder;
+
+  /// Active provider (for display in the UI).
+  OfferwallProvider get provider => OfferwallConfig.provider;
 
   /// Host set that may load inside the WebView; all other links open externally.
-  Set<String> get allowedHosts {
-    final Set<String> hosts = <String>{...OfferwallConfig.allowedHosts};
-    final Uri? uri = Uri.tryParse(OfferwallConfig.offerwallUrl);
-    if (uri != null && uri.host.isNotEmpty) {
-      hosts.add(uri.host);
-    }
-    return hosts;
-  }
+  Set<String> get allowedHosts => OfferwallConfig.allowedHosts;
 
   /// Whether [url] belongs to an allowed offerwall host.
   bool isInternalUrl(String url) {

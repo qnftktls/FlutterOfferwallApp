@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../data/sample_data.dart';
+import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
 import '../services/points_repository.dart';
 import '../theme/app_theme.dart';
@@ -23,19 +24,21 @@ class _MainShellState extends State<MainShell> {
   int _index = 0;
   late final PageController _pageController;
 
+  /// Icons + localization keys for the four destinations. Labels are resolved
+  /// from [AppLocalizations] at build time so they react to language changes.
   static const List<_NavItem> _items = <_NavItem>[
-    _NavItem(Icons.redeem_rounded, Icons.redeem_outlined, 'Earn'),
+    _NavItem(Icons.redeem_rounded, Icons.redeem_outlined, 'tab_earn'),
     _NavItem(
       Icons.sports_esports_rounded,
       Icons.sports_esports_outlined,
-      'Games',
+      'tab_games',
     ),
     _NavItem(
       Icons.account_balance_wallet_rounded,
       Icons.account_balance_wallet_outlined,
-      'Cashout',
+      'tab_cashout',
     ),
-    _NavItem(Icons.person_rounded, Icons.person_outline_rounded, 'Profile'),
+    _NavItem(Icons.person_rounded, Icons.person_outline_rounded, 'tab_profile'),
   ];
 
   @override
@@ -58,6 +61,7 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
     return Scaffold(
       body: Column(
         children: <Widget>[
@@ -89,7 +93,7 @@ class _MainShellState extends State<MainShell> {
                   item.iconActive,
                   color: AppColors.brandAccent,
                 ),
-                label: item.label,
+                label: l.t(item.label),
               ),
             )
             .toList(),
@@ -100,8 +104,11 @@ class _MainShellState extends State<MainShell> {
 
 class _NavItem {
   const _NavItem(this.icon, this.iconActive, this.label);
+
   final IconData icon;
   final IconData iconActive;
+
+  /// Localization key (not the literal label).
   final String label;
 }
 
@@ -112,8 +119,11 @@ class _ShellHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
     final PointsRepository repo = context.watch<PointsRepository>();
     final List<RewardTransaction> tx = repo.transactions;
+    final int availableCount =
+        SampleData.offers.length + SampleData.missions.length;
 
     return Material(
       color: theme.colorScheme.surface,
@@ -157,9 +167,14 @@ class _ShellHeader extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
-                        Text('Rewards Hub', style: theme.textTheme.titleMedium),
                         Text(
-                          '${SampleData.offers.length + SampleData.missions.length} offers available',
+                          l.t('app_name'),
+                          style: theme.textTheme.titleMedium,
+                        ),
+                        Text(
+                          l.f('offers_available', <String, Object?>{
+                            'n': availableCount,
+                          }),
                           style: theme.textTheme.bodySmall,
                         ),
                       ],
@@ -188,7 +203,10 @@ class _ShellHeader extends StatelessWidget {
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        'Latest: ${tx.first.title}  +${PointsMath.formatPoints(tx.first.points)} pts',
+                        l.f('latest_ticker', <String, Object?>{
+                          'title': tx.first.title,
+                          'pts': PointsMath.formatPoints(tx.first.points),
+                        }),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: theme.textTheme.bodySmall?.copyWith(
@@ -243,7 +261,7 @@ class _BalancePill extends StatelessWidget {
             ),
           ),
           Text(
-            '${PointsMath.formatPoints(points)} pts',
+            '${PointsMath.formatPoints(points)} ${context.l10n.t('pts')}',
             style: const TextStyle(
               color: Color(0xFF04121F),
               fontSize: 10.5,

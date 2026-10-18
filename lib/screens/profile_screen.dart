@@ -1,22 +1,47 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
+import '../services/auth_service.dart';
 import '../services/points_repository.dart';
+import '../services/settings_repository.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offer_card.dart';
+import 'auth_screen.dart';
 import 'earn_screen.dart' show SnackBarHelper;
 import 'reward_history_screen.dart';
 
-/// The "Profile" tab: account summary, quick stats, and settings.
+/// The "Profile" tab: account (Firebase Auth), quick stats, language switch and
+/// settings.
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
 
+  /// Opens the auth flow; returns true if the user signed in / continued.
+  Future<void> _openAuth(BuildContext context) async {
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(builder: (_) => const AuthScreen()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Rebuild whenever the auth state changes.
+    return ValueListenableBuilder<AppUser?>(
+      valueListenable: AuthService.instance.user,
+      builder: (BuildContext context, AppUser? user, _) =>
+          _buildBody(context, user),
+    );
+  }
+
+  Widget _buildBody(BuildContext context, AppUser? user) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
     final PointsRepository repo = context.watch<PointsRepository>();
-    final int earned = repo.transactions.fold(0, (sum, t) => sum + t.points);
+    final SettingsRepository settings = context.watch<SettingsRepository>();
+    final int earned = repo.transactions
+        .where((t) => t.points > 0)
+        .fold(0, (sum, t) => sum + t.points);
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(
@@ -36,12 +61,12 @@ class ProfileScreen extends StatelessWidget {
           ),
           child: Row(
             children: <Widget>[
-              const CircleAvatar(
+              CircleAvatar(
                 radius: 28,
                 backgroundColor: AppColors.brandPrimary,
                 child: Text(
-                  'RH',
-                  style: TextStyle(
+                  user?.initials ?? 'RH',
+                  style: const TextStyle(
                     color: AppColors.brandAccent,
                     fontWeight: FontWeight.w700,
                   ),
@@ -52,10 +77,21 @@ class ProfileScreen extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    Text('Guest user', style: theme.textTheme.titleMedium),
+                    Text(
+                      user == null
+                          ? l.t('guest_user')
+                          : (user.isGuest
+                              ? l.t('guest_user')
+                              : user.email),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleMedium,
+                    ),
                     const SizedBox(height: 2),
                     Text(
-                      'Sign in to sync across devices',
+                      user == null || user.isGuest
+                          ? l.t('sign_in_sync')
+                          : l.t('signed_in_as'),
                       style: theme.textTheme.bodySmall,
                     ),
                   ],
@@ -64,6 +100,30 @@ class ProfileScreen extends StatelessWidget {
             ],
           ),
         ),
+        const SizedBox(height: AppSpacing.sm),
+        // Sign in / out button
+        if (user == null || user.isGuest)
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: () => _openAuth(context),
+              style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
+              icon: const Icon(Icons.login_rounded, size: 20),
+              label: Text(l.t('sign_in')),
+            ),
+          )
+        else
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                await AuthService.instance.signOut();
+              },
+              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 48)),
+              icon: const Icon(Icons.logout_rounded, size: 20),
+              label: Text(l.t('sign_out')),
+            ),
+          ),
         const SizedBox(height: AppSpacing.md),
 
         // Stats
@@ -71,27 +131,29 @@ class ProfileScreen extends StatelessWidget {
           children: <Widget>[
             _statCard(
               context,
-              'Balance',
+              l.t('balance'),
               repo.cashFormatted,
               '${PointsMath.formatPoints(repo.points)} pts',
             ),
             const SizedBox(width: 10),
             _statCard(
               context,
-              'Total earned',
+              l.t('total_earned'),
               PointsMath.formatPoints(earned),
-              'pts all-time',
+              l.t('pts_all_time'),
             ),
           ],
         ),
         const SizedBox(height: AppSpacing.lg),
 
-        const SectionHeader(title: 'Account'),
+        SectionHeader(title: l.t('account')),
         _tile(
           context,
           icon: Icons.receipt_long_rounded,
-          title: 'Reward history',
-          subtitle: '${repo.transactions.length} transactions',
+          title: l.t('reward_history'),
+          subtitle: l.f('n_transactions', <String, Object?>{
+            'n': repo.transactions.length,
+          }),
           onTap: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => const RewardHistoryScreen(),
@@ -101,35 +163,43 @@ class ProfileScreen extends StatelessWidget {
         _tile(
           context,
           icon: Icons.account_balance_wallet_rounded,
-          title: 'Cashout methods',
-          subtitle: 'PayPal, gift cards, crypto',
-          onTap: () => SnackBarHelper.showError(
-            context,
-            'Open the Cashout tab to withdraw.',
+          title: l.t('cashout_methods'),
+          subtitle: l.t('cashout_methods_sub'),
+          onTap: () => SnackBarHelper.showError(context, l.t('cashout_stub')),
+        ),
+        _tile(
+          context,
+          icon: Icons.translate_rounded,
+          title: l.t('language'),
+          subtitle: l.t('language_sub'),
+          trailing: IgnorePointer(
+            child: Switch(
+              value: settings.locale.languageCode == 'ko',
+              onChanged: (_) {},
+            ),
           ),
+          onTap: settings.toggleLocale,
         ),
         _tile(
           context,
           icon: Icons.help_outline_rounded,
-          title: 'Help & support',
-          subtitle: 'FAQ and contact',
-          onTap: () =>
-              SnackBarHelper.showError(context, 'Support is a demo stub.'),
+          title: l.t('help_support'),
+          subtitle: l.t('help_sub'),
+          onTap: () => SnackBarHelper.showError(context, l.t('support_stub')),
         ),
         _tile(
           context,
           icon: Icons.privacy_tip_outlined,
-          title: 'Privacy policy',
-          subtitle: 'How your data is used',
-          onTap: () =>
-              SnackBarHelper.showError(context, 'Policy is a demo stub.'),
+          title: l.t('privacy_policy'),
+          subtitle: l.t('privacy_sub'),
+          onTap: () => SnackBarHelper.showError(context, l.t('policy_stub')),
         ),
         const SizedBox(height: AppSpacing.sm),
         _tile(
           context,
           icon: Icons.restart_alt_rounded,
-          title: 'Reset demo data',
-          subtitle: 'Clear points and history',
+          title: l.t('reset_demo'),
+          subtitle: l.t('reset_demo_sub'),
           danger: true,
           onTap: () => _confirmReset(context, repo),
         ),
@@ -172,6 +242,7 @@ class ProfileScreen extends StatelessWidget {
     required String title,
     required String subtitle,
     required VoidCallback onTap,
+    Widget? trailing,
     bool danger = false,
   }) {
     final ThemeData theme = Theme.of(context);
@@ -211,7 +282,8 @@ class ProfileScreen extends StatelessWidget {
                     ],
                   ),
                 ),
-                const Icon(Icons.chevron_right_rounded, size: 20),
+                trailing ??
+                    const Icon(Icons.chevron_right_rounded, size: 20),
               ],
             ),
           ),
@@ -224,21 +296,20 @@ class ProfileScreen extends StatelessWidget {
     BuildContext context,
     PointsRepository repo,
   ) async {
+    final AppLocalizations l = context.l10n;
     final bool? ok = await showDialog<bool>(
       context: context,
       builder: (BuildContext ctx) => AlertDialog(
-        title: const Text('Reset demo data?'),
-        content: const Text(
-          'This clears your points and reward history. Useful for testing.',
-        ),
+        title: Text(l.t('reset_title')),
+        content: Text(l.t('reset_body')),
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
+            child: Text(l.t('cancel')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Reset'),
+            child: Text(l.t('reset')),
           ),
         ],
       ),

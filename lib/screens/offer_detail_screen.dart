@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
 import '../services/interstitial.dart';
 import '../services/points_repository.dart';
@@ -37,6 +38,7 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
 
   void _completeOffer() {
     if (_completed) return;
+    final AppLocalizations l = context.l10n;
     final PointsRepository repo = context.read<PointsRepository>();
     repo.addPoints(
       widget.offer.reward,
@@ -46,19 +48,22 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
     setState(() => _completed = true);
     SnackBarHelper.showReward(
       context,
-      'You earned ${PointsMath.formatPoints(widget.offer.reward)} points!',
+      l.f('earned_points', <String, Object?>{
+        'pts': PointsMath.formatPoints(widget.offer.reward),
+      }),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
     final Offer offer = widget.offer;
     final Color accent = hexColor(offer.accent);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Offer details'),
+        title: Text(l.t('offer_details')),
         backgroundColor: theme.colorScheme.surface,
       ),
       body: Column(
@@ -93,16 +98,14 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
                 const SizedBox(height: AppSpacing.lg),
                 _rewardBox(context, offer, accent),
                 const SizedBox(height: AppSpacing.md),
-                const SectionHeader(title: 'How to complete'),
-                _step('1', 'Tap "Start offer" to open the provider page.'),
-                _step('2', 'Follow the instructions (install, survey, etc.).'),
-                _step('3', 'Come back here — your points are credited.'),
+                SectionHeader(title: l.t('how_to_complete')),
+                _step('1', l.t('step1')),
+                _step('2', l.t('step2')),
+                _step('3', l.t('step3')),
                 const SizedBox(height: AppSpacing.md),
-                const SectionHeader(title: 'Terms'),
+                SectionHeader(title: l.t('terms')),
                 Text(
-                  'Rewards are credited after the provider confirms completion. '
-                  'In this demo the credit is applied locally and instantly. '
-                  'In production this must be verified server-side.',
+                  l.t('terms_body'),
                   style: theme.textTheme.bodySmall,
                 ),
                 const SizedBox(height: AppSpacing.lg),
@@ -131,8 +134,10 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
                       ),
                       child: Text(
                         _completed
-                            ? 'Completed ✓'
-                            : 'Start offer · +${PointsMath.formatPoints(offer.reward)} pts',
+                            ? l.t('completed')
+                            : l.f('start_offer', <String, Object?>{
+                                'pts': PointsMath.formatPoints(offer.reward),
+                              }),
                         style: const TextStyle(
                           fontWeight: FontWeight.w700,
                           fontSize: 15,
@@ -150,6 +155,7 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
   }
 
   Widget _rewardBox(BuildContext context, Offer offer, Color accent) {
+    final AppLocalizations l = context.l10n;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(AppSpacing.md),
@@ -162,18 +168,18 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: <Widget>[
           _stat(
-            'Reward',
+            l.t('reward'),
             '+${PointsMath.formatPoints(offer.reward)} pts',
             accent,
           ),
           Container(width: 1, height: 34, color: accent.withValues(alpha: 0.3)),
           _stat(
-            'Value',
+            l.t('value'),
             PointsMath.formatCash(PointsMath.pointsToCash(offer.reward)),
             accent,
           ),
           Container(width: 1, height: 34, color: accent.withValues(alpha: 0.3)),
-          _stat('Category', offer.category, accent),
+          _stat(l.t('category'), offer.category, accent),
         ],
       ),
     );

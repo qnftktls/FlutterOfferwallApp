@@ -2,20 +2,28 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../data/sample_data.dart';
+import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
+import '../services/auth_service.dart';
+import '../services/payout_service.dart';
 import '../services/points_repository.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offer_card.dart';
 import 'earn_screen.dart' show SnackBarHelper;
 
-/// The "Cashout" tab: pick a payout method and (demo) request a withdrawal.
-/// Real payout integration is provider/backend work — this is the full UI flow.
+/// The "Cashout" tab: pick a payout method and request a withdrawal.
+///
+/// Requests are routed through [PayoutService], which simulates the payout in
+/// demo mode and POSTs to your backend (`POST /payouts`) once
+/// `PayoutConfig.demoMode` is disabled. On success the points are deducted
+/// locally so the balance stays in sync.
 class CashoutScreen extends StatelessWidget {
   const CashoutScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
     final PointsRepository repo = context.watch<PointsRepository>();
     final double balance = repo.cashValue;
 
@@ -42,9 +50,9 @@ class CashoutScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              const Text(
-                'Available to cash out',
-                style: TextStyle(color: Color(0xCC04121F), fontSize: 13),
+              Text(
+                l.t('available_cashout'),
+                style: const TextStyle(color: Color(0xCC04121F), fontSize: 13),
               ),
               const SizedBox(height: 4),
               Text(
@@ -57,14 +65,16 @@ class CashoutScreen extends StatelessWidget {
                 ),
               ),
               Text(
-                '${PointsMath.formatPoints(repo.points)} points',
+                l.f('your_points_n', <String, Object?>{
+                  'pts': PointsMath.formatPoints(repo.points),
+                }),
                 style: const TextStyle(color: Color(0xCC04121F), fontSize: 13),
               ),
             ],
           ),
         ),
         const SizedBox(height: AppSpacing.lg),
-        const SectionHeader(title: 'Choose a payout method'),
+        SectionHeader(title: l.t('choose_payout')),
         ...SampleData.cashouts.map((option) {
           final bool eligible = balance >= option.minCash;
           return Padding(
@@ -72,17 +82,12 @@ class CashoutScreen extends StatelessWidget {
             child: _CashoutTile(
               option: option,
               eligible: eligible,
-              balance: balance,
-              onTap: () => _request(context, option, eligible, repo.points),
+              onTap: () => _request(context, option, eligible, repo),
             ),
           );
         }),
         const SizedBox(height: AppSpacing.sm),
-        Text(
-          'Minimums shown per method. In production these payouts are fulfilled '
-          'by your backend + the provider; this demo only simulates the request.',
-          style: theme.textTheme.bodySmall,
-        ),
+        Text(l.t('cashout_footnote'), style: theme.textTheme.bodySmall),
       ],
     );
   }
@@ -91,13 +96,16 @@ class CashoutScreen extends StatelessWidget {
     BuildContext context,
     CashoutOption option,
     bool eligible,
-    int points,
+    PointsRepository repo,
   ) {
+    final AppLocalizations l = context.l10n;
     if (!eligible) {
       SnackBarHelper.showError(
         context,
-        'Not enough balance. ${option.label} needs '
-        '${PointsMath.formatCash(option.minCash)}.',
+        l.f('not_enough', <String, Object?>{
+          'method': option.label,
+          'amount': PointsMath.formatCash(option.minCash),
+        }),
       );
       return;
     }
@@ -105,7 +113,7 @@ class CashoutScreen extends StatelessWidget {
       context: context,
       showDragHandle: true,
       builder: (BuildContext ctx) =>
-          _ConfirmSheet(option: option, points: points),
+          _ConfirmSheet(option: option, points: repo.points),
     );
   }
 }
@@ -114,13 +122,11 @@ class _CashoutTile extends StatelessWidget {
   const _CashoutTile({
     required this.option,
     required this.eligible,
-    required this.balance,
     required this.onTap,
   });
 
   final CashoutOption option;
   final bool eligible;
-  final double balance;
   final VoidCallback onTap;
 
   @override
@@ -170,7 +176,9 @@ class _CashoutTile extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: <Widget>[
                     Text(
-                      'min ${PointsMath.formatCash(option.minCash)}',
+                      context.l10n.f('min', <String, Object?>{
+                        'amount': PointsMath.formatCash(option.minCash),
+                      }),
                       style: theme.textTheme.bodySmall?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
@@ -194,15 +202,55 @@ class _CashoutTile extends StatelessWidget {
   }
 }
 
-class _ConfirmSheet extends StatelessWidget {
+class _ConfirmSheet extends StatefulWidget {
   const _ConfirmSheet({required this.option, required this.points});
 
   final CashoutOption option;
   final int points;
 
   @override
+  State<_ConfirmSheet> createState() => _ConfirmSheetState();
+}
+
+class _ConfirmSheetState extends State<_ConfirmSheet> {
+  bool _busy = false;
+
+  Future<void> _submit() async {
+    final AppLocalizations l = context.l10n;
+    final PointsRepository repo = context.read<PointsRepository>();
+    final String userRef =
+        AuthService.instance.user.value?.uid ?? 'guest';
+
+    setState(() => _busy = true);
+    final PayoutResult res = await PayoutService.instance.requestCashout(
+      option: widget.option,
+      points: widget.points,
+      userRef: userRef,
+    );
+    if (!mounted) return;
+    setState(() => _busy = false);
+
+    if (res.ok) {
+      // Real payout: deduct the points and record the withdrawal.
+      repo.spend(
+        widget.points,
+        title: l.f('cashout_via', <String, Object?>{
+          'method': widget.option.label,
+        }),
+      );
+      Navigator.pop(context);
+      SnackBarHelper.showReward(context, l.t('cashout_submitted'));
+    } else {
+      SnackBarHelper.showError(context, res.message);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
+    final CashoutOption option = widget.option;
+    final int points = widget.points;
     final int needed = PointsMath.cashToPoints(option.minCash);
 
     return Padding(
@@ -222,7 +270,9 @@ class _ConfirmSheet extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Cash out via ${option.label}',
+                  l.f('cashout_via', <String, Object?>{
+                    'method': option.label,
+                  }),
                   style: theme.textTheme.titleLarge,
                 ),
               ),
@@ -231,39 +281,44 @@ class _ConfirmSheet extends StatelessWidget {
           const SizedBox(height: AppSpacing.md),
           _row(
             context,
-            'Your points',
+            l.t('your_points'),
             '${PointsMath.formatPoints(points)} pts',
           ),
           _row(
             context,
-            'Value',
+            l.t('value'),
             PointsMath.formatCash(PointsMath.pointsToCash(points)),
           ),
           _row(
             context,
-            'Method minimum',
+            l.t('method_minimum'),
             PointsMath.formatCash(option.minCash),
           ),
           const SizedBox(height: AppSpacing.sm),
           Text(
-            'You could withdraw up to '
-            '${PointsMath.formatCash(PointsMath.pointsToCash(points))} '
-            '(${PointsMath.formatPoints(needed)} pts = ${PointsMath.formatCash(option.minCash)}).',
+            '${l.f('withdraw_up_to', <String, Object?>{
+              'amount': PointsMath.formatCash(PointsMath.pointsToCash(points)),
+            })} '
+            '(${PointsMath.formatPoints(needed)} pts = '
+            '${PointsMath.formatCash(option.minCash)})',
             style: theme.textTheme.bodySmall,
           ),
           const SizedBox(height: AppSpacing.lg),
           SizedBox(
             width: double.infinity,
             child: FilledButton(
-              onPressed: () {
-                Navigator.pop(context);
-                SnackBarHelper.showReward(
-                  context,
-                  'Cashout request submitted (demo)!',
-                );
-              },
+              onPressed: _busy ? null : _submit,
               style: FilledButton.styleFrom(minimumSize: const Size(0, 52)),
-              child: const Text('Request cashout'),
+              child: _busy
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Color(0xFF04121F),
+                      ),
+                    )
+                  : Text(l.t('request_cashout')),
             ),
           ),
         ],

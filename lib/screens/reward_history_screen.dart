@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
 import '../services/points_repository.dart';
 import '../theme/app_theme.dart';
@@ -12,12 +13,13 @@ class RewardHistoryScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
     final List<RewardTransaction> tx = context
         .watch<PointsRepository>()
         .transactions;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Reward history')),
+      appBar: AppBar(title: Text(l.t('reward_history'))),
       body: tx.isEmpty
           ? Center(
               child: Column(
@@ -29,10 +31,10 @@ class RewardHistoryScreen extends StatelessWidget {
                     color: AppTheme.muted(context),
                   ),
                   const SizedBox(height: 12),
-                  Text('No rewards yet', style: theme.textTheme.titleMedium),
+                  Text(l.t('no_rewards'), style: theme.textTheme.titleMedium),
                   const SizedBox(height: 4),
                   Text(
-                    'Complete an offer to see it here.',
+                    l.t('no_rewards_sub'),
                     style: theme.textTheme.bodySmall,
                   ),
                 ],
@@ -58,12 +60,19 @@ class RewardHistoryScreen extends StatelessWidget {
                         height: 40,
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
-                          color: AppColors.brandAccent.withValues(alpha: 0.14),
+                          color: (t.points >= 0
+                                  ? AppColors.brandAccent
+                                  : Colors.redAccent)
+                              .withValues(alpha: 0.14),
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        child: const Icon(
-                          Icons.add_rounded,
-                          color: AppColors.brandAccent,
+                        child: Icon(
+                          t.points >= 0
+                              ? Icons.add_rounded
+                              : Icons.remove_rounded,
+                          color: t.points >= 0
+                              ? AppColors.brandAccent
+                              : Colors.redAccent,
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -89,14 +98,17 @@ class RewardHistoryScreen extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.end,
                         children: <Widget>[
                           Text(
-                            '+${PointsMath.formatPoints(t.points)}',
-                            style: const TextStyle(
+                            '${t.points >= 0 ? '+' : '-'}'
+                            '${PointsMath.formatPoints(t.points.abs())}',
+                            style: TextStyle(
                               fontWeight: FontWeight.w700,
-                              color: AppColors.brandAccent,
+                              color: t.points >= 0
+                                  ? AppColors.brandAccent
+                                  : Colors.redAccent,
                             ),
                           ),
                           Text(
-                            PointsMath.formatCash(t.cash),
+                            PointsMath.formatCash(t.cash.abs()),
                             style: theme.textTheme.bodySmall,
                           ),
                         ],

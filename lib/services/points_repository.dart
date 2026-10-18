@@ -87,6 +87,26 @@ class PointsRepository extends ChangeNotifier {
   int credit({required int points, required String title}) =>
       addPoints(points, offerTitle: title);
 
+  /// Deducts points for a withdrawal and records it in the history.
+  ///
+  /// Returns the new balance. Callers should check eligibility *before*
+  /// calling this (see `PayoutService`).
+  int spend(int points, {required String title}) {
+    final int amount = points.abs();
+    _points = (_points - amount).clamp(0, 1 << 31);
+    _transactions.insert(
+      0,
+      RewardTransaction(
+        title: title,
+        points: -amount,
+        timestamp: DateTime.now(),
+      ),
+    );
+    _persistSoon();
+    notifyListeners();
+    return _points;
+  }
+
   /// Resets the balance to zero — useful for logout or debugging.
   Future<void> reset() async {
     _points = 0;

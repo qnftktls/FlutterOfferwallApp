@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../data/sample_data.dart';
+import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
 import '../services/points_repository.dart';
 import '../theme/app_theme.dart';
@@ -16,6 +17,7 @@ class GamesScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(
@@ -40,10 +42,13 @@ class GamesScreen extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    Text('Play & earn big', style: theme.textTheme.titleMedium),
+                    Text(
+                      l.t('play_earn_big'),
+                      style: theme.textTheme.titleMedium,
+                    ),
                     const SizedBox(height: 2),
                     Text(
-                      'Install a game and hit milestones for the biggest payouts.',
+                      l.t('play_earn_sub'),
                       style: theme.textTheme.bodySmall,
                     ),
                   ],
@@ -53,7 +58,7 @@ class GamesScreen extends StatelessWidget {
           ),
         ),
         const SizedBox(height: AppSpacing.md),
-        const SectionHeader(title: 'Game missions'),
+        SectionHeader(title: l.t('game_missions')),
         ...SampleData.missions.map(
           (m) => Padding(
             padding: const EdgeInsets.only(bottom: 12),
@@ -81,6 +86,7 @@ class _MissionCardState extends State<_MissionCard> {
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
+    final AppLocalizations l = context.l10n;
     final Mission m = widget.mission;
     final Color accent = hexColor(m.accent);
     final int claimedPoints = _claimed.fold(
@@ -125,7 +131,7 @@ class _MissionCardState extends State<_MissionCard> {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: <Widget>[
                   Text(
-                    'up to',
+                    l.t('up_to'),
                     style: theme.textTheme.bodySmall?.copyWith(fontSize: 10.5),
                   ),
                   Text(
@@ -159,8 +165,11 @@ class _MissionCardState extends State<_MissionCard> {
           ),
           const SizedBox(height: 6),
           Text(
-            '${_claimed.length}/${m.milestones.length} milestones · '
-            '+${PointsMath.formatPoints(claimedPoints)} pts earned',
+            l.f('milestones', <String, Object?>{
+              'done': _claimed.length,
+              'total': m.milestones.length,
+              'pts': PointsMath.formatPoints(claimedPoints),
+            }),
             style: theme.textTheme.bodySmall,
           ),
           const SizedBox(height: AppSpacing.sm),
@@ -212,7 +221,7 @@ class _MissionCardState extends State<_MissionCard> {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      child: Text(done ? 'Done' : 'Claim'),
+                      child: Text(done ? l.t('done') : l.t('claim')),
                     ),
                   ),
                 ],
@@ -225,6 +234,7 @@ class _MissionCardState extends State<_MissionCard> {
   }
 
   void _claim(int index) {
+    final AppLocalizations l = context.l10n;
     final Mission m = widget.mission;
     final MissionMilestone ms = m.milestones[index];
     if (_claimed.contains(index)) return;
@@ -237,7 +247,10 @@ class _MissionCardState extends State<_MissionCard> {
     setState(() => _claimed.add(index));
     SnackBarHelper.showReward(
       context,
-      '${m.game}: +${PointsMath.formatPoints(ms.points)} pts!',
+      l.f('game_reward', <String, Object?>{
+        'game': m.game,
+        'pts': PointsMath.formatPoints(ms.points),
+      }),
     );
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../data/sample_data.dart';
+import '../l10n/app_localizations.dart';
 import '../models/offer.dart';
 import '../services/offerwall_controller.dart';
 import '../services/points_repository.dart';
@@ -53,6 +54,7 @@ class _EarnScreenState extends State<EarnScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final AppLocalizations l = context.l10n;
     final List<String> categories = <String>[
       'All',
       ...{...SampleData.offers.map((o) => o.category)},
@@ -73,7 +75,7 @@ class _EarnScreenState extends State<EarnScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                const SectionHeader(title: 'Featured offerwall'),
+                SectionHeader(title: l.t('featured_offerwall')),
                 SizedBox(
                   height: 260,
                   child: ClipRRect(
@@ -91,7 +93,7 @@ class _EarnScreenState extends State<EarnScreen> {
                             SnackBarHelper.showError(context, m),
                         onExternalLink: (u) => SnackBarHelper.showError(
                           context,
-                          'Link blocked: $u',
+                          l.f('link_blocked', <String, Object?>{'url': u}),
                         ),
                       ),
                     ),
@@ -99,9 +101,11 @@ class _EarnScreenState extends State<EarnScreen> {
                 ),
                 const SizedBox(height: AppSpacing.md),
                 SectionHeader(
-                  title: 'More offers',
+                  title: l.t('more_offers'),
                   trailing: Text(
-                    '${_filtered.length} available',
+                    l.f('n_available', <String, Object?>{
+                      'n': _filtered.length,
+                    }),
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
@@ -147,6 +151,7 @@ class _EarnScreenState extends State<EarnScreen> {
   }
 
   Widget _topBanner(BuildContext context) {
+    final AppLocalizations l = context.l10n;
     final PointsRepository repo = context.watch<PointsRepository>();
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
@@ -165,9 +170,9 @@ class _EarnScreenState extends State<EarnScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                const Text(
-                  'Your balance',
-                  style: TextStyle(color: Colors.white70, fontSize: 12.5),
+                Text(
+                  l.t('your_balance'),
+                  style: const TextStyle(color: Colors.white70, fontSize: 12.5),
                 ),
                 const SizedBox(height: 2),
                 Text(
@@ -180,8 +185,9 @@ class _EarnScreenState extends State<EarnScreen> {
                   ),
                 ),
                 Text(
-                  '${PointsMath.formatPoints(repo.points)} points · '
-                  '1,000 pts = \$1',
+                  l.f('points_value', <String, Object?>{
+                    'pts': PointsMath.formatPoints(repo.points),
+                  }),
                   style: const TextStyle(color: Colors.white70, fontSize: 12),
                 ),
                 const SizedBox(height: AppSpacing.sm),
@@ -194,7 +200,7 @@ class _EarnScreenState extends State<EarnScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 14),
                   ),
                   icon: const Icon(Icons.sports_esports_rounded, size: 18),
-                  label: const Text('Play games to earn'),
+                  label: Text(l.t('play_games')),
                 ),
               ],
             ),
