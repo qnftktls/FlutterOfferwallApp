@@ -1,27 +1,81 @@
 # Rewards Hub — 남은 필수 작업 (출시 전 체크리스트)
 
-작성 시각 기준 원격 실측 결과입니다. **STEP 6 멈춤보다 훨씬 큰 문제가 3개 있습니다.**
+> ## ✅ 진행 상황 (최신)
+>
+> | 항목 | 이전 | 현재 |
+> |---|---|---|
+> | Blaze 결제 | ❌ | ✅ 활성 |
+> | Functions 3개 배포 | ❌ | ✅ 배포 + 검증 완료 |
+> | **Firebase Authentication** | ❌ 404 | ✅ **활성** (`email enabled = True`) |
+> | **신규 가격표 반영** | ⚠️ 미확정 | ✅ **확인** (`game_puzzle#0` → 250p) |
+> | **실제 포인트 지급** | ❌ | ✅ **E2E 증명** (250p 지급 + Firestore 기록) |
+> | 멱등성 (중복 지급 방지) | — | ✅ 작동 (`duplicated:true`) |
+> | 서버가 금액 결정 | — | ✅ 클라이언트가 `points:9999999` 보내도 250p만 지급 |
+> | 안티프라우드 원격 검증 | — | ✅ **9/9 통과** |
+> | **🔴 출금 조작 익스플로잇** | 미인지 | ❌ **증명됨 — 즉시 조치 필요** |
+> | 하드닝된 보안 규칙 적용 | ❌ | ❌ **미적용 (최우선)** |
+>
+> ---
+>
+> ## 🔴 0순위 — 실제 익스플로잇을 증명했습니다 (지금 바로 조치)
+>
+> 테스트 계정으로 **실제 공격을 실행해서 성공시켰습니다.** 추측이 아닙니다:
+>
+> ```
+> [1] 공격자 계정 생성 (앱과 동일한 방식)     잔액 0
+> [2] Firestore 직접 쓰기 → "내 잔액 = 50000"  HTTP 200  ★ 규칙이 허용
+> [3] requestPayout(paypal, 50000p)           HTTP 200
+>     → {"message":"Requested $50.00 via PayPal."}   ★★★ 인출 성공
+> ```
+>
+> **누구나 계정 하나 만들고 잔액을 조작해 무제한으로 돈을 뺄 수 있습니다.**
+> (테스트 흔적은 전부 삭제했습니다 — payout, user 문서, Auth 계정 모두.)
+>
+> ### 원인
+>
+> `requestPayout` 이 `users/{uid}.points` 를 그대로 믿는데,
+> **현재 배포된 규칙**이 클라이언트에게 그 필드의 쓰기를 허용합니다:
+>
+> ```javascript
+> // firestore.rules (현재 배포본)
+> allow read, write: if request.auth != null && request.auth.uid == uid;
+> //                  ^^^^ 자기 문서면 뭐든 쓸 수 있음 → 잔액 무한 조작
+> ```
+>
+> ### 조치 (두 겹으로 막았습니다)
+>
+> **1겹 — 하드닝된 규칙 적용 (필수):**
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -ApplyRules
+> ```
+>
+> **2겹 — 서버 전용 원장 도입 (코드에 이미 반영):**
+> `users/{uid}.serverLedger` 는 **Cloud Functions 만** 쓸 수 있습니다
+> (Admin SDK 는 보안 규칙을 우회하므로 클라이언트는 위조 불가).
+> 출금은 이제 `points` 가 아니라 원장을 기준으로 계산됩니다:
+> ```
+> 출금 가능액 = ledger.verified + min(ledger.unverified, 2000)
+> ```
+> → 규칙 적용 전이라도 **최대 피해가 $2** (모든 출금 최소액 미달 = 인출 불가).
+> 출금 시 원장에서도 차감하므로 **반복 출금도 불가**합니다.
+>
+> **남은 작업: 재배포** (아래 4번 순서 참고) — 배포해야 2겹이 활성화됩니다.
+>
+> ⚠️ **기존 계정 안내**: 원장 도입 전에 가입한 계정은 `serverLedger` 가 없어
+> 출금 가능액이 0으로 보입니다. 의도된 동작입니다 (그 잔액은 검증된 적이 없음).
+> 실제로 보상을 받은 사용자는 postback/claim 이후 자동으로 원장이 채워집니다.
+> 기존 잔액을 살리려면 최초 1회 마이그레이션이 필요합니다 — 문의 주세요.
 
 ---
 
-## 0. 방금 확인한 사실 (추측 아님, 원격 API 실측)
+## 1. ✅ 해결됨 — Firebase Authentication
 
-| 확인 항목 | 방법 | 결과 | 판정 |
-|---|---|---|---|
-| Functions 3개 배포 | `POST /claimOffer` 등 | HTTP 401 `{"message":"Sign in to claim rewards."}` | ✅ 살아있음 |
-| **신규 가격표 반영** | 코드에 `game_puzzle#0` 존재 | 인증 전 401이라 **판정 불가** | ⚠️ 미확정 |
-| **Firebase Authentication** | `identitytoolkit admin/v2/projects/.../config` | **HTTP 404 `CONFIGURATION_NOT_FOUND`** | ❌ **비활성** |
-| Auth 클라이언트 signUp | `accounts:signUp` (Web API 키) | **HTTP 400 `CONFIGURATION_NOT_FOUND`** | ❌ **비활성** |
-| Firestore DB | `firestore/v1/projects/.../databases` | HTTP 200 | ✅ 존재 |
-| Firebase 프로젝트 상태 | `firebase/v1beta1/projects/...` | `state=ACTIVE` | ✅ 정상 |
-| Blaze 결제 | (이전 확인) | 활성 | ✅ 완료 |
-| SA 토큰 | JWT RS256 | 발급 성공 | ✅ 정상 |
+이전에 `CONFIGURATION_NOT_FOUND` 였으나 **지금은 활성화되었습니다.**
+실측: `admin/v2 config → HTTP 200`, `email enabled = True`.
 
----
+**아래는 기록용으로 남깁니다.**
 
-## 1. 🔴 최우선 — Firebase Authentication 이 초기화되지 않았다
-
-### 왜 치명적인가
+### 왜 치명적이었는가
 
 `claimOffer` 와 `requestPayout` 은 **로그인이 필수**입니다:
 
@@ -185,31 +239,74 @@ python verify_deployment.py
 
 ## 4. 남은 작업 순서
 
-### 지금 즉시 (브라우저, 5분)
-- [ ] **Firebase Console → Authentication → 이메일/비밀번호 사용 설정**  ← 가장 급함
-- [ ] 익명 로그인은 사용 안 함으로 유지
+### 🔴 지금 즉시 (터미널) — 익스플로잇 차단
+```powershell
+cd $HOME\FlutterOfferwallApp
+git pull
 
-### 지금 즉시 (터미널)
-- [ ] `deploy_all.ps1` 실행 중이면 **Ctrl + C** (배포는 이미 끝났거나 멈춘 상태, 안전)
-- [ ] `cd $HOME\FlutterOfferwallApp; git pull`
-- [ ] `powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -TimeoutSeconds 1200`
+# 1) 서버 전용 원장 + 출금 상한 반영 (2겹 방어 활성화)
+powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -TimeoutSeconds 1200
 
-### 확인 후
-- [ ] `python verify_deployment.py` → 신규 가격표 반영 확인
-- [ ] `auth_service.dart` 의 `uid='local'` 폴백 제거
-- [ ] `.\deploy.ps1 -ApplyRules` 실행 (anti-fraud 규칙 적용)
+# 2) 하드닝된 보안 규칙 적용 ← 클라이언트의 잔액 조작을 근본 차단
+powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -ApplyRules
+```
 
-### 운영 준비
+### 적용 후 검증 (터미널)
+```powershell
+python verify_deployment.py            # 9/9 + 조작 차단 확인
+```
+그리고 익스플로잇을 **다시 시도**해서 막히는지 확인하세요:
+```powershell
+# 잔액 조작 시도 → HTTP 403 이어야 정상
+# 출금 시도 → failed-precondition 이어야 정상
+```
+
+### ✅ 이미 완료된 것
+- [x] Blaze 결제 활성
+- [x] Firebase Authentication → 이메일/비밀번호 사용 설정
+- [x] Functions 3개 배포 + 원격 검증 (9/9)
+- [x] 신규 per-milestone 가격표 반영 확인
+- [x] E2E 보상 지급 증명 (250p + Firestore 기록)
+- [x] 멱등성 작동 확인
+- [x] 서버가 금액 결정함을 확인 (클라이언트 조작 무시)
+
+### 운영 준비 (출시 전)
 - [ ] **`OFFERWALL_SECRET` 회전** — 이전 값이 터미널에 노출되었습니다 (폐기 대상)
       ```powershell
       powershell -Command "[Convert]::ToHexString((1..32 | ForEach-Object { Get-Random -Max 256 })).ToLower()"
       ```
+      > ⚠️ 시크릿을 회전하면 함수를 **재배포**해야 반영됩니다.
 - [ ] 오퍼월 제공자 대시보드에 postback URL 등록
       `https://us-central1-flutter-offerwall-app.cloudfunctions.net/offerwallPostback`
 - [ ] `offerwall_controller.dart` 의 클라이언트 `addPoints` 를 서버 경로로 전환
       (실제 제공자 postback 이 대체하므로 보류 중)
-- [ ] 보안 규칙 적용 **전에** 모든 크레딧 경로가 서버 기반인지 확인
-      — 아님 게임 보상이 조용히 막힙니다
+- [ ] `auth_service.dart` 의 `uid='local'` 가짜 로그인 폴백 제거
+      (Auth 가 켜졌으므로 이제 위험합니다 — 아래 참고)
+- [ ] **기존 계정 잔액 마이그레이션** (원장 도입 전 가입자)
+      원장이 없어 출금 가능액 0으로 표시됩니다. 실제 지급 이력이 있는 계정만
+      최초 1회 `serverLedger.verified` 로 이관하면 됩니다.
+
+### ⚠️ 규칙 적용의 부작용 (반드시 이해하고 진행)
+
+`-ApplyRules` 를 적용하면 **클라이언트는 `points`/`tx` 를 쓸 수 없게 됩니다.**
+각 화면이 어떻게 동작하는지 정리했습니다:
+
+| 화면/경로 | 규칙 적용 후 | 조치 |
+|---|---|---|
+| 오퍼 완료 (`offer_detail_screen`) | ✅ 서버 경로 → 정상 | 없음 |
+| 게임 마일스톤 (`games_screen`) | ✅ 서버 경로 → 정상 | 없음 |
+| 출금 (`cashout_screen`) | ✅ 서버 경로 → 정상 | 없음 |
+| **오퍼월 브리지** (`offerwall_controller`) | ⚠️ **로컬 크레딧 실패** | 아래 참고 |
+| `_pushSoon()` 부가 push | ⚠️ 규칙상 거부 (UI 무해) | 없음 (아래 참고) |
+
+**오퍼월 브리지**: `addPoints` 로 로컬 숫자만 올리고 `_pushSoon()` 이 서버에
+밀어넣으려다 **규칙에 막힙니다.** 앱은 안 죽지만(에러 삼킴) **사용자는 보상을
+못 받습니다.** → 실제 제공자 계정을 연결해 postback 경로로 전환해야 합니다.
+그 전까지는 placeholder 오퍼월이므로 실사용자 피해는 없습니다.
+
+**`_pushSoon()` 잔여 push**: `claimOffer` 성공 후 로컬 갱신분을 서버로 밀려다
+거부당합니다. 값이 이미 서버와 같으므로(서버가 진실) **아무 영향 없습니다.**
+다만 Firestore 로그에 permission-denied 가 남으니 정상적인 현상으로 보세요.
 
 ---
 

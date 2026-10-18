@@ -4,35 +4,63 @@ rules_version = '2';
 // ============================================================================
 // Deploy this AFTER the Cloud Functions are live.
 //
-// Difference from firestore.rules (dev):
-//   * `points` and `tx` become SERVER-ONLY. The client may read its document
-//     but can NEVER write the balance — only Cloud Functions (Admin SDK, which
-//     bypasses these rules) can credit or debit points.
-//   * The client may still write *harmless* profile fields (device, locale…).
+// Threat model this closes
+// ------------------------
+// `requestPayout` reads `users/{uid}.points` to decide how much money to pay
+// out. If the owning client can write that field, anyone can create an account,
+// set `points = 50000` and withdraw $50. That was PROVEN end-to-end against the
+// dev rules (see CRITICAL_PATHS.md).
 //
-// This is what makes a client-side balance tamper-proof: patching the APK and
-// POSTing your own points simply fails, because the write is denied.
+// So every money-relevant field becomes SERVER-ONLY here. Cloud Functions use
+// the Admin SDK, which bypasses these rules entirely — the client is the only
+// thing being locked out.
+//
+// Fields the client may NEVER write:
+//   points         the balance a payout is computed from
+//   tx             the history shown in the UI (audit data)
+//   serverLedger   the authoritative ledger of what was really credited
+//   processedTxns  the idempotency set (removing entries would allow replays)
+//   processedProviders / lastRewardAt — server bookkeeping
+//
+// The client may still read its own document and write harmless profile
+// metadata (device, locale, ...) as long as it touches nothing above.
 
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    /// True when `field` is absent from both sides, or present and equal.
+    ///
+    /// A plain `request.resource.data.x == resource.data.x` throws when the key
+    /// is missing on one side (which denies the write, but for the wrong
+    /// reason). This helper makes "both absent" a legitimate no-op.
+    function untouched(field) {
+      return (!(field in request.resource.data) && !(field in resource.data))
+          || (field in request.resource.data && field in resource.data
+              && request.resource.data[field] == resource.data[field]);
+    }
 
     match /users/{uid} {
       // Read your own document (balance + history) — that's all the app needs.
       allow read: if request.auth != null && request.auth.uid == uid;
 
-      // First write may create a document, but NEVER with points/tx set by the
-      // client: they must be absent or match the safe defaults.
+      // A brand-new document may only be seeded with harmless profile data.
+      // No balance, no history, no ledger — so an attacker cannot mint one.
       allow create: if request.auth != null
                     && request.auth.uid == uid
                     && !("points" in request.resource.data)
-                    && !("tx" in request.resource.data);
+                    && !("tx" in request.resource.data)
+                    && !("serverLedger" in request.resource.data)
+                    && !("processedTxns" in request.resource.data);
 
-      // Updates: the balance fields must be unchanged. Only non-sensitive
-      // profile metadata may be written from the client.
+      // Updates may change profile metadata only. Every money-relevant field
+      // must be byte-identical to what the server last wrote.
       allow update: if request.auth != null
                     && request.auth.uid == uid
-                    && request.resource.data.points == resource.data.points
-                    && request.resource.data.tx == resource.data.tx;
+                    && untouched("points")
+                    && untouched("tx")
+                    && untouched("serverLedger")
+                    && untouched("processedTxns")
+                    && untouched("lastRewardAt");
 
       // The client may not delete its document (history is audit data).
       allow delete: if false;

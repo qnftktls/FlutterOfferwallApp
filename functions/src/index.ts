@@ -62,6 +62,18 @@ const POINTS_PER_DOLLAR = 1000;
 /** Max history entries kept per user (mirrors the client + rules). */
 const MAX_HISTORY = 200;
 
+/**
+ * Lifetime cap on points a user may ACCRUE from non-verified sources.
+ *
+ * This is a backstop, not a substitute for real postback verification. It
+ * exists because `requestPayout` reads `users/{uid}.points`, and a client that
+ * can write that field could otherwise mint an unlimited balance and withdraw
+ * it. With this cap the worst case is bounded and small — not $50,000.
+ *
+ * 1,000 points = $1, so 2,000 points = $2. Well below every payout minimum.
+ */
+const MAX_UNVERIFIED_POINTS = 2_000;
+
 /** Providers we recognise as sources of postbacks. */
 const KNOWN_PROVIDERS = [
   "ayet",
@@ -113,6 +125,40 @@ function toInt(v: unknown): number {
 }
 
 /**
+ * Server-only ledger of points this backend has actually authorised.
+ *
+ * WHY THIS EXISTS — this is the anti-fraud core.
+ *
+ * `users/{uid}.points` is a UI mirror and, until the hardened rules are
+ * deployed, the owning client can write it. So it can NEVER be trusted for
+ * money. This ledger can only be written by Cloud Functions running with the
+ * Admin SDK, which bypasses security rules entirely.
+ *
+ *   verified    — credited from a signature-verified provider postback.
+ *   unverified  — credited from the client-callable `claimOffer`.
+ *
+ * `unverified` is capped when paying out (see requestPayout) purely as
+ * defence in depth: `claimOffer` already prices everything server-side, so a
+ * tampered client cannot inflate it. The cap stops a future bug in that path
+ * from becoming a cash-out.
+ *
+ * Stored as a nested map and updated with FieldValue.increment so concurrent
+ * credits cannot race.
+ */
+interface ServerLedger {
+  verified: number;
+  unverified: number;
+}
+
+function readLedger(data: Record<string, unknown> | undefined): ServerLedger {
+  const raw = data?.serverLedger as Partial<ServerLedger> | undefined;
+  return {
+    verified: toInt(raw?.verified),
+    unverified: toInt(raw?.unverified),
+  };
+}
+
+/**
  * Atomically credits `points` to `uid` and records the history entry.
  *
  * Idempotency: when `txnId` is given, it is written into a `processedTxns`
@@ -125,8 +171,10 @@ async function creditReward(opts: {
   title: string;
   offerId?: string;
   txnId?: string;
+  /** true only for signature-verified provider postbacks. */
+  verified: boolean;
 }): Promise<{ ok: boolean; balance?: number; duplicate?: boolean }> {
-  const { uid, points, title, offerId, txnId } = opts;
+  const { uid, points, title, offerId, txnId, verified } = opts;
   if (points <= 0) return { ok: false };
   if (points > 10_000_000) {
     logger.warn(`Refusing implausible reward ${points} for ${uid}`);
@@ -159,11 +207,16 @@ async function creditReward(opts: {
     };
     const nextHistory = [entry, ...history].slice(0, MAX_HISTORY);
 
+    // Increment only the bucket this credit belongs to. FieldValue.increment
+    // keeps concurrent credits from losing each other's writes.
+    const ledgerField = verified ? "serverLedger.verified" : "serverLedger.unverified";
+
     const update: Record<string, unknown> = {
       points: balance,
       tx: nextHistory,
       updatedAt: FieldValue.serverTimestamp(),
       lastRewardAt: FieldValue.serverTimestamp(),
+      [ledgerField]: FieldValue.increment(points),
     };
     if (txnId) {
       const seen: string[] = data.processedTxns ?? [];
@@ -233,6 +286,7 @@ export const offerwallPostback = onRequest(
         title: String(body.title ?? `${provider} offer completed`),
         offerId,
         txnId,
+        verified: true, // signature verified above — this is the trusted path
       });
       logger.info(
         `Postback ok: uid=${uid} pts=${points} provider=${provider} dup=${!!result.duplicate}`,
@@ -322,6 +376,10 @@ export const claimOffer = onCall(async (request) => {
     title: priced.title,
     offerId,
     txnId: idempotencyKey,
+    // The app called this, not the provider. Even though the AMOUNT is
+    // server-decided, the TRIGGER is not independently verified, so it can
+    // never be paid out. See MAX_UNVERIFIED_POINTS in requestPayout.
+    verified: false,
   });
 
   return {
@@ -386,17 +444,52 @@ export const requestPayout = onCall(async (request) => {
 
   const newBalance = await db.runTransaction(async (tx) => {
     const snap = await tx.get(userRef);
-    const balance = toInt(snap.data()?.points);
+    const data = snap.data() ?? {};
+    const balance = toInt(data.points);
 
-    if (balance < points) {
-      throw new HttpsError(
-        "failed-precondition",
-        `Insufficient balance: have ${balance}, need ${points}.`,
+    // ---------------------------------------------------------------------
+    // SECURITY: bound what a client-writable balance can be worth.
+    //
+    // `users/{uid}.points` is a UI mirror and is currently writable by the
+    // owning client, so a tampered app can inflate it. The `serverLedger`
+    // field can ONLY be written by Cloud Functions (Admin SDK bypasses
+    // security rules), so it is the trustworthy source for money.
+    //
+    // We pay out `verified + capped(unverified)`, never the raw balance.
+    // Until the hardened rules are applied, the worst case an attacker
+    // reaches is $2 — below every payout minimum, so it cannot be cashed out.
+    // ---------------------------------------------------------------------
+    const ledger = readLedger(data);
+    const payable = ledger.verified + Math.min(ledger.unverified, MAX_UNVERIFIED_POINTS);
+
+    if (payable > balance) {
+      // The mirror is LOWER than the ledger (e.g. a stale/tampered client
+      // wrote a smaller value). Never pay out more than the ledger allows.
+      logger.warn(
+        `Ledger ahead of mirror for uid=${uid}: payable=${payable} balance=${balance}. ` +
+        `Using the ledger.`,
       );
     }
 
-    const history: RewardEntry[] = Array.isArray(snap.data()?.tx)
-      ? (snap.data()!.tx as RewardEntry[])
+    const available = Math.min(payable, balance);
+    const unverifiedExcess = Math.max(0, balance - available);
+    if (unverifiedExcess > 0) {
+      logger.warn(
+        `Payout for uid=${uid} is bounded: balance=${balance} ` +
+        `verified=${ledger.verified} unverified=${ledger.unverified} ` +
+        `payable=${available} (excess ${unverifiedExcess} is unverified).`,
+      );
+    }
+
+    if (available < points) {
+      throw new HttpsError(
+        "failed-precondition",
+        `Insufficient verified balance: have ${available}, need ${points}.`,
+      );
+    }
+
+    const history: RewardEntry[] = Array.isArray(data.tx)
+      ? (data.tx as RewardEntry[])
       : [];
     const entry: RewardEntry = {
       title: `Cash out via ${option.label}`,
@@ -404,10 +497,20 @@ export const requestPayout = onCall(async (request) => {
       timestamp: Timestamp.now(),
     };
 
+    // Deduct from the ledger FIRST so a payout can never be repeated against
+    // the same credited points. We consume `unverified` before `verified` so
+    // that a capped bucket cannot be used as a standing allowance: if the
+    // client re-inflates `points`, the ledger still remembers the payout.
+    const spendUnverified = Math.min(points, ledger.unverified);
+    const spendVerified = points - spendUnverified;
+
     tx.set(
       userRef,
       {
-        points: balance - points,
+        // The mirror is reduced by whatever the ledger actually released.
+        points: balance - (spendUnverified + spendVerified),
+        "serverLedger.unverified": FieldValue.increment(-spendUnverified),
+        "serverLedger.verified": FieldValue.increment(-spendVerified),
         tx: [entry, ...history].slice(0, MAX_HISTORY),
         updatedAt: FieldValue.serverTimestamp(),
       },

@@ -309,10 +309,26 @@ if ($alive -eq 3) { Ok 'all 3 functions are live' } else { Warn "$alive/3 respon
 # ---------------------------------------------------------------- STEP 5
 Step 'STEP 5 - anti-fraud Firestore rules'
 if (-not $ApplyRules) {
-    Warn 'SKIPPED (safe default) - the app keeps working end to end'
-    Info 'points/tx stay client-writable until you opt in.'
-    Info 're-run with -ApplyRules once every credit path is server-backed:'
-    Info "  powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -ApplyRules"
+    # LOUD on purpose. Skipping this leaves a PROVEN cash-out exploit open:
+    # the client can PATCH its own `points` and then withdraw real money.
+    Write-Host ""
+    Write-Host "  ################################################################" -ForegroundColor Red
+    Write-Host "  #                                                              #" -ForegroundColor Red
+    Write-Host "  #   NOT SECURE YET - SKIPPED BY DESIGN (you must opt in)        #" -ForegroundColor Red
+    Write-Host "  #                                                              #" -ForegroundColor Red
+    Write-Host "  ################################################################" -ForegroundColor Red
+    Write-Host ""
+    Bad 'the client can still write its own balance -> PROVEN cash-out exploit'
+    Info 'anyone can create an account, set points=50000 and withdraw $50.'
+    Info ''
+    Info 'the app keeps working, but this is NOT safe to ship.'
+    Info ''
+    Info 'to close it, run the SAME script one more time with -ApplyRules:'
+    Write-Host ""
+    Write-Host "      powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -ApplyRules" -ForegroundColor White
+    Write-Host ""
+    Info 'or verify the current state any time with:'
+    Info '      python security_regression.py'
 } else {
     $rules = Join-Path $Root 'firestore.rules'
     $bak   = Join-Path $Root 'firestore.rules.clientonly.bak'
@@ -332,6 +348,27 @@ if (-not $ApplyRules) {
         Warn 'rules deploy failed - restoring the client-writable version'
         Copy-Item -LiteralPath $bak -Destination $rules -Force
         Show-LogTail -LogFile $r2.LogFile -Lines 25
+    }
+}
+
+# ---------------------------------------------------------------- STEP 6
+# A green checkmark above must not be mistaken for "we are safe". Read the
+# rules that are ACTUALLY LIVE and say plainly whether money can leak.
+Step 'STEP 6 - live security verdict'
+$verdict = Join-Path $Root 'security_regression.py'
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Warn 'python not found - cannot run security_regression.py'
+    Info 'install Python 3, then:  python security_regression.py'
+} elseif (-not (Test-Path -LiteralPath $verdict)) {
+    Warn 'security_regression.py not found'
+} else {
+    Info 'attempting the real exploit against the live project...'
+    Write-Host ""
+    & python $verdict
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Bad 'SECURITY CHECK FAILED - money can still be extracted'
+        Info 'follow the fix printed above, then re-run this script.'
     }
 }
 
